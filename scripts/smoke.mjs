@@ -8,6 +8,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import puppeteer from 'puppeteer-core'
+import { resolveChrome } from './chrome.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, '..')
@@ -19,7 +20,7 @@ if (!existsSync(extensionPath)) {
 }
 
 const userDataDir = mkdtempSync(join(tmpdir(), 'whybuy-test-'))
-const puppeteerChrome = 'C:\\Users\\doomj\\.cache\\puppeteer\\chrome\\win64-149.0.7827.22\\chrome-win64\\chrome.exe'
+const puppeteerChrome = resolveChrome()
 const fileUrl = 'file:///' + join(__dirname, 'test-page.html').replace(/\\/g, '/')
 
 console.log('Launching Chrome with extension from', extensionPath)

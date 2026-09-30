@@ -4,11 +4,12 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import puppeteer from 'puppeteer-core'
+import { resolveChrome } from './chrome.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, '..')
 const extensionPath = join(projectRoot, '.output', 'chrome-mv3')
-const puppeteerChrome = 'C:\\Users\\doomj\\.cache\\puppeteer\\chrome\\win64-149.0.7827.22\\chrome-win64\\chrome.exe'
+const puppeteerChrome = resolveChrome()
 
 const url = process.argv[2] || 'https://www.amazon.ca/checkout/p/p-703-8999281-6162623/pay?pipelineType=Chewbacca&hasWorkingJavascript=1'
 const userDataDir = mkdtempSync(join(tmpdir(), 'whybuy-investigate-'))

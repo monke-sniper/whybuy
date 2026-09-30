@@ -8,12 +8,13 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import puppeteer from 'puppeteer-core'
+import { resolveChrome } from './chrome.mjs'
 import { assertIsolatedProfile, logIsolatedProfile } from './lib/test-isolation.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, '..')
 const extensionPath = join(projectRoot, '.output', 'chrome-mv3')
-const puppeteerChrome = 'C:\\Users\\doomj\\.cache\\puppeteer\\chrome\\win64-149.0.7827.22\\chrome-win64\\chrome.exe'
+const puppeteerChrome = resolveChrome()
 const baseFile = 'file:///' + join(__dirname, 'test-page.html').replace(/\\/g, '/')
 
 if (!existsSync(extensionPath)) {
@@ -46,49 +47,38 @@ try {
   await new Promise((r) => setTimeout(r, 1500))
 
   // === Test 1: URL-tier regex sanity (runs in Node) ===
+  // NOTE: isFinalPaymentStep/isEarlyCheckoutStep are deprecated and now
+  // hard-coded to `return false`. The trial only ever fires on a literal
+  // checkout-button click, never on URL. These assertions previously
+  // expected the old URL-matching behavior and could not pass.
   console.log('\n=== Test 1: URL tiering logic ===')
   const { isFinalPaymentStep, isEarlyCheckoutStep } = await import('../lib/intercept/selectors.ts')
 
-  const finalUrls = [
+  const allUrls = [
     'https://www.amazon.ca/checkout/p/p-703-8999281-6162623/pay?pipelineType=Chewbacca',
     'https://example.com/checkout/abc/pay',
     'https://example.com/pay',
     'https://example.com/place-order',
     'https://example.com/checkout/abc/place-order',
     'https://example.com/order-confirm',
-  ]
-  for (const u of finalUrls) {
-    const r = isFinalPaymentStep(u)
-    console.log(`  isFinalPaymentStep(${u.slice(0, 70)}) = ${r}`)
-    if (!r) throw new Error(`Expected ${u} to be a final step`)
-  }
-  console.log(`✔ ${finalUrls.length} final-step URLs detected`)
-
-  const earlyUrls = [
     'https://www.amazon.ca/cart',
     'https://example.com/cart',
     'https://www.amazon.ca/checkout/',
     'https://example.com/checkout/abc/shipping',
     'https://example.com/checkout/abc/payment',
-  ]
-  for (const u of earlyUrls) {
-    const r = isEarlyCheckoutStep(u)
-    console.log(`  isEarlyCheckoutStep(${u.slice(0, 60)}) = ${r}`)
-    if (!r) throw new Error(`Expected ${u} to be an early checkout step`)
-  }
-  console.log(`✔ ${earlyUrls.length} early-step URLs detected`)
-
-  const notCheckoutUrls = [
     'https://example.com/',
     'https://example.com/products/widget',
     'https://example.com/about',
   ]
-  for (const u of notCheckoutUrls) {
-    if (isEarlyCheckoutStep(u) || isFinalPaymentStep(u)) {
-      throw new Error(`Expected ${u} to NOT be a checkout URL`)
+  for (const u of allUrls) {
+    if (isFinalPaymentStep(u)) {
+      throw new Error(`isFinalPaymentStep must always return false, got true for ${u}`)
+    }
+    if (isEarlyCheckoutStep(u)) {
+      throw new Error(`isEarlyCheckoutStep must always return false, got true for ${u}`)
     }
   }
-  console.log(`✔ ${notCheckoutUrls.length} non-checkout URLs correctly ignored`)
+  console.log(`✔ ${allUrls.length} URLs correctly ignored (no URL auto-trigger)`)
 
   // === Test 2: Tiered button classification ===
   console.log('\n=== Test 2: Button classification ===')
@@ -154,24 +144,23 @@ try {
   // classification is verified by the unit tests for the regex patterns.
   console.log(`  ${cases.length} button tiers verified by regex (see unit tests)`)
 
-  // === Test 3: Click is intercepted on /cart-like page ===
-  console.log('\n=== Test 3: Cart URL auto-triggers trial ===')
+  // === Test 3: "Buy Now" is NOT intercepted ===
+  // Per the product spec, the ONLY gesture that fires the trial is a
+  // literal checkout button. "Buy Now", "Add to cart", "Place order",
+  // "Pay now" and "Continue to payment" must all pass through. This test
+  // previously asserted the opposite and could never pass.
+  console.log('\n=== Test 3: "Buy Now" is NOT intercepted ===')
   const page1 = await browser.newPage()
   page1.on('pageerror', (err) => console.log('  [pageerror]', err.message))
-
-  // Navigate to a URL with /cart in it. Use a data URL trick: we can't.
-  // Instead, we'll go to a page where we manually call the content script
-  // logic. Simpler: use the test page which has "Buy Now", verify intercept.
 
   await page1.goto(baseFile, { waitUntil: 'load' })
   await new Promise((r) => setTimeout(r, 600))
 
-  // The base test page has a "Buy Now" button. It should be intercepted.
   await page1.click('#buy')
   await new Promise((r) => setTimeout(r, 1500))
   const hostOn1 = await page1.evaluate(() => !!document.querySelector('[data-whybuy="1"]'))
-  if (!hostOn1) throw new Error('Trial did not mount on Buy Now click')
-  console.log('✔ Buy Now on test page was intercepted')
+  if (hostOn1) throw new Error('Trial must NOT mount on a "Buy Now" click')
+  console.log('✔ Buy Now on test page was not intercepted')
   await page1.screenshot({ path: join(projectRoot, 'screenshot-7-buy-now.png') })
 
   // === Test 4: "Place your order" on /pay URL is NOT intercepted ===

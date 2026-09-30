@@ -15,11 +15,12 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:http'
 import puppeteer from 'puppeteer-core'
+import { resolveChrome } from './chrome.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, '..')
 const fixturePath = join(__dirname, 'fixtures', 'cart', 'amazon.html')
-const puppeteerChrome = 'C:\\Users\\doomj\\.cache\\puppeteer\\chrome\\win64-149.0.7827.22\\chrome-win64\\chrome.exe'
+const puppeteerChrome = resolveChrome()
 
 if (!existsSync(fixturePath)) {
   console.error('Fixture not found:', fixturePath)
@@ -208,8 +209,12 @@ try {
     if (cart.source === 'amazon') pass('source === "amazon"')
     else fail(`source should be "amazon", got "${cart.source}"`)
 
-    if (cart.currency === 'CAD') pass('currency === "CAD"')
-    else fail(`currency should be "CAD", got "${cart.currency}"`)
+    // The fixture is Amazon.com with bare "$" prices, so USD is correct.
+    // (Commit 2d3f635 blanket-replaced this assertion to CAD; that was a
+    // behavioural change, not a label change. CAD is only produced on .ca
+    // domains, which 127.0.0.1 is not.)
+    if (cart.currency === 'USD') pass('currency === "USD"')
+    else fail(`currency should be "USD", got "${cart.currency}"`)
   }
 } catch (err) {
   console.error('\n✘ Cart fixture test failed:', err.message)

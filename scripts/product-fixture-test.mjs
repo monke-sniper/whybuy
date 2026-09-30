@@ -24,11 +24,12 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:http'
 import puppeteer from 'puppeteer-core'
+import { resolveChrome } from './chrome.mjs'
 import { build } from 'esbuild'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, '..')
-const puppeteerChrome = 'C:\\Users\\doomj\\.cache\\puppeteer\\chrome\\win64-149.0.7827.22\\chrome-win64\\chrome.exe'
+const puppeteerChrome = resolveChrome()
 
 const FIXTURES = [
   {
@@ -46,7 +47,7 @@ const FIXTURES = [
       price: 35.99,
       rating: 4.7,
       reviewCount: 12453,
-      currency: 'CAD',
+      currency: 'USD',
     },
   },
   {
@@ -58,7 +59,7 @@ const FIXTURES = [
       name: 'Acme Mug',
       brand: 'Acme',
       price: 12.99,
-      currency: 'CAD',
+      currency: 'USD',
     },
   },
   {
@@ -70,7 +71,7 @@ const FIXTURES = [
       name: 'The Cool Hat',
       brand: null,
       price: 19.99,
-      currency: 'CAD',
+      currency: 'USD',
     },
   },
 ]

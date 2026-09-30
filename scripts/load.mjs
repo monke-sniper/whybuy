@@ -22,6 +22,7 @@ import { existsSync, rmSync, mkdtempSync } from 'node:fs'
 import { join, dirname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
+import { resolveChrome } from './chrome.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, '..')
@@ -38,7 +39,7 @@ const requestedProfile = process.argv[2] || process.env.WHYBUY_PROFILE || null
 // Test isolation: a real (non-tempdir) profile would let the
 // extension's storage state pollute the user's day-to-day Chrome.
 // Refuse unless explicitly allowed.
-const isTempProfile = (p: string): boolean => {
+const isTempProfile = (p) => {
   if (!p) return false
   const abs = resolve(p)
   const tmp = resolve(tmpdir())
@@ -46,7 +47,7 @@ const isTempProfile = (p: string): boolean => {
   return abs === tmp || abs.startsWith(tmp + sep)
 }
 
-let userDataDir: string
+let userDataDir
 if (requestedProfile) {
   if (isTempProfile(requestedProfile)) {
     userDataDir = requestedProfile
@@ -70,25 +71,8 @@ if (requestedProfile) {
   userDataDir = mkdtempSync(join(tmpdir(), 'whybuy-profile-'))
 }
 
-// Find Chrome (system Chrome first, fall back to puppeteer's bundled Chromium).
-const candidates = [
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-  process.env.LOCALAPPDATA + '\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Users\\doomj\\.cache\\puppeteer\\chrome\\win64-149.0.7827.22\\chrome-win64\\chrome.exe',
-]
-let chromePath
-for (const p of candidates) {
-  if (p && existsSync(p)) {
-    chromePath = p
-    break
-  }
-}
-if (!chromePath) {
-  console.error('✘ Chrome not found. Tried:')
-  for (const p of candidates) console.error('  -', p)
-  process.exit(1)
-}
+// Find Chrome (env override first, then a cross-platform system install).
+const chromePath = resolveChrome()
 
 console.log('Chrome:', chromePath)
 console.log('Profile:', userDataDir)

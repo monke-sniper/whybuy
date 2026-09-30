@@ -1,7 +1,7 @@
 {
   "name": "whybuy",
   "description": "Courtroom-inspired purchase interceptor. The product is on trial. Argue for it. The judge decides.",
-  "version": "0.1.0",
+  "version": "0.1.0-untested",
   "private": false,
   "license": "UNLICENSED",
   "type": "module",
