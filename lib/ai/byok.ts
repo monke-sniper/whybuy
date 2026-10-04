@@ -2,13 +2,12 @@ import type { AIProvider, Cart, ChatMessage, ByokConfig, ByokProvider, Product, 
 import { log, warn } from '../utils/log.ts'
 import { splitThinkBlocks } from './think.ts'
 import { parseNaturalVerdict, verdictFromNatural, type NaturalParseResult } from './judgeParse.ts'
-import { fallbackVerdict, normalizeDecision } from './verdictHelpers.ts'
 import { buildCounselSubjectLine, buildCounselOpeningUserPrompt, buildCounselRebuttalUserPrompt } from './counselUserPrompt.ts'
 
 // Re-export for tests / callers that import from byok.
 export { splitThinkBlocks }
-export { parseNaturalVerdict, verdictFromNatural } from './judgeParse'
-export { normalizeDecision, clampConfidence, fallbackVerdict } from './verdictHelpers'
+export { parseNaturalVerdict, verdictFromNatural } from './judgeParse.ts'
+export { normalizeDecision, clampConfidence, fallbackVerdict } from './verdictHelpers.ts'
 
 /**
  * BYOK (bring-your-own-key) provider. Speaks the OpenAI Chat Completions
@@ -20,13 +19,11 @@ export { normalizeDecision, clampConfidence, fallbackVerdict } from './verdictHe
  *
  * The streaming response is parsed line-by-line as SSE-style chunks.
  *
- * The judge is configurable via `cfg.judgeMode`:
- *   - `'natural'` (default) — a line-based ruling format
- *     (DECISION/CONFIDENCE/REASONING/SUMMARY/FACTORS). Works on every
- *     model, including non-reasoning ones like `ministral-3:8b`.
- *   - `'structured'` — the historical `<think>...</think>` analysis
- *     followed by a strict JSON verdict. Best on reasoning models like
- *     `gpt-oss:20b` or `kimi-k2-thinking`.
+ * The judge always writes a line-based ruling (DECISION/CONFIDENCE/
+ * REASONING/SUMMARY/FACTORS), which works on every model, including
+ * non-reasoning ones like `ministral-3:8b`. The historical
+ * `<think>`+JSON judge mode was retired; a stored `judgeMode: 'structured'`
+ * is treated as `'natural'`.
  */
 
 interface ChatMessageWire {
@@ -80,12 +77,21 @@ const PROVIDERS: Record<ByokProvider, ProviderConfig> = {
   },
 }
 
-/**
- * Default judge mode when the user hasn't picked one. `'natural'` is
- * the safe default: it works on every model, including the small
- * non-reasoning ones the BYOK UI defaults to.
- */
-const DEFAULT_JUDGE_MODE: 'natural' | 'structured' = 'natural'
+interface StatusCacheEntry {
+  result: Promise<ProviderStatus>
+  expires: number
+  pending: boolean
+}
+
+const STATUS_OK_TTL_MS = 60 * 1000
+const STATUS_PROBE_TIMEOUT_MS = 10 * 1000
+const STATUS_ERR_TTL_MS = 10 * 1000
+const statusCache = new Map<string, StatusCacheEntry>()
+
+/** Test hook: forget cached provider probes. */
+export function clearByokStatusCache(): void {
+  statusCache.clear()
+}
 
 export class BYOK implements AIProvider {
   readonly kind = 'byok' as const
@@ -115,11 +121,6 @@ export class BYOK implements AIProvider {
     return this.cfg.judgeModel || this.model
   }
 
-  /** Judge output mode. `natural` is the safe default. */
-  private get judgeMode(): 'natural' | 'structured' {
-    return this.cfg.judgeMode === 'structured' ? 'structured' : DEFAULT_JUDGE_MODE
-  }
-
   private get headers(): Record<string, string> {
     const h: Record<string, string> = { 'Content-Type': 'application/json' }
     if (this.cfg.apiKey) {
@@ -128,10 +129,29 @@ export class BYOK implements AIProvider {
     return h
   }
 
-  async status(): Promise<ProviderStatus> {
+  /**
+   * Provider readiness. The network probe is a real (billable,
+   * rate-limited) one-token completion, so the result is cached per
+   * endpoint+model+key and concurrent callers share one in-flight probe.
+   * Pass `{ fresh: true }` for an explicit "Test connection".
+   */
+  async status(opts: { fresh?: boolean } = {}): Promise<ProviderStatus> {
     if (PROVIDERS[this.cfg.provider].needsKey && !this.cfg.apiKey) {
       return { kind: 'needs-key' }
     }
+    const key = `${this.endpoint}|${this.model}|${this.cfg.apiKey ?? ''}`
+    if (opts.fresh) statusCache.delete(key)
+    const hit = statusCache.get(key)
+    if (hit && (hit.pending || Date.now() < hit.expires)) return hit.result
+    const entry: StatusCacheEntry = { result: this.probe(), expires: 0, pending: true }
+    statusCache.set(key, entry)
+    const result = await entry.result
+    entry.pending = false
+    entry.expires = Date.now() + (result.kind === 'ready' ? STATUS_OK_TTL_MS : STATUS_ERR_TTL_MS)
+    return result
+  }
+
+  private async probe(): Promise<ProviderStatus> {
     try {
       // Lightweight ping: ask the model to echo one token.
       const r = await fetch(this.endpoint, {
@@ -143,6 +163,8 @@ export class BYOK implements AIProvider {
           max_tokens: 1,
           stream: false,
         }),
+        // A hung probe must settle, or every later status check would share it.
+        signal: AbortSignal.timeout(STATUS_PROBE_TIMEOUT_MS),
       })
       if (!r.ok) {
         const text = await r.text().catch(() => '')
@@ -197,7 +219,7 @@ export class BYOK implements AIProvider {
     signal?: AbortSignal,
   ): Promise<Verdict> {
     const messages = this.buildJudgeMessages(args)
-    const text = await this.nonStreamChat(messages, signal)
+    const text = await this.nonStreamChat(messages, signal, { modelOverride: this.judgeModel })
     // Both 'natural' and 'structured' judge modes use the same
     // paragraph + ruling line shape now.
     const parsed = parseNaturalVerdict(text)
@@ -277,7 +299,7 @@ export class BYOK implements AIProvider {
     }
 
     try {
-      await this.streamRaw(messages, signal, { tag: 'judge-natural', onDelta, temperature: 0.3 })
+      await this.streamRaw(messages, signal, { tag: 'judge-natural', onDelta, modelOverride: this.judgeModel, temperature: 0.3 })
     } catch (e) {
       if (!resolved) throw e
       // We've already got a complete verdict; swallow any post-ruling
@@ -306,75 +328,6 @@ export class BYOK implements AIProvider {
   }
 
   /**
-   * Structured-mode streaming: keep the historical think-block + JSON
-   * behavior, including the Ollama Cloud `gpt-oss:20b` non-streaming
-   * fallback.
-   */
-  private async streamJudgeStructured(
-    messages: ChatMessageWire[],
-    onReasoning: (text: string) => void,
-    signal: AbortSignal | undefined,
-    t0: number,
-  ): Promise<{ verdict: Verdict; reasoning: string }> {
-    let lastReasoning = ''
-    const onDelta = (delta: string) => {
-      const { reasoning } = splitThinkBlocks(acc + delta)
-      if (reasoning !== lastReasoning) {
-        lastReasoning = reasoning
-        onReasoning(reasoning)
-      }
-    }
-    let acc = ''
-    // Wrap onDelta so it always sees the running accumulator.
-    let wrappedOnDelta: ((d: string) => void) | undefined
-    wrappedOnDelta = (delta: string) => {
-      acc += delta
-      onDelta(delta)
-    }
-    void wrappedOnDelta // (kept for future per-delta use)
-
-    // Per-chunk reasoning callback: re-parse on every delta.
-    const perChunkReasoning = (running: string) => {
-      const { reasoning } = splitThinkBlocks(running)
-      if (reasoning !== lastReasoning) {
-        lastReasoning = reasoning
-        onReasoning(reasoning)
-      }
-    }
-    const raw = await this.streamRaw(messages, signal, {
-      tag: 'judge-structured',
-      onChunk: perChunkReasoning,
-      modelOverride: this.judgeModel,
-      temperature: 0.3,
-    })
-    log('BYOK streamJudgeStructured: raw length=', raw.length, '| first200=', raw.slice(0, 200))
-    if (raw && raw.trim().length > 0) {
-      const { reasoning, body } = splitThinkBlocks(raw)
-      log('BYOK streamJudgeStructured: reasoning length=', reasoning.length, '| body length=', body.length)
-      onReasoning(reasoning)
-      const verdict = this.parseStructuredVerdict(body)
-      log('BYOK streamJudgeStructured: parsed verdict decision=', verdict.decision, '| conf=', verdict.confidence, '| summary=', verdict.summary.slice(0, 100))
-      return { verdict, reasoning }
-    }
-
-    // Empty streaming response (gpt-oss:20b via Ollama Cloud OpenAI-
-    // compat). Fall back to non-streaming; the response may carry the
-    // reasoning in a separate `reasoning` field.
-    log('BYOK judge stream empty; falling back to non-streaming for', this.judgeModel)
-    const data = await this.nonStreamChatRaw(messages, signal, { modelOverride: this.judgeModel, temperature: 0.3 })
-    const content = (data?.choices?.[0]?.message?.content ?? '') as string
-    const reasoningField = (data?.choices?.[0]?.message?.reasoning ?? data?.reasoning ?? '') as string
-    log('BYOK streamJudgeStructured fallback: content length=', content.length, '| reasoning field length=', reasoningField.length)
-    const combined = [content, reasoningField].filter(Boolean).join('\n\n')
-    const { reasoning, body } = splitThinkBlocks(combined)
-    log('BYOK streamJudgeStructured fallback: reasoning length=', reasoning.length, '| body length=', body.length)
-    onReasoning(reasoning)
-    const verdict = this.parseStructuredVerdict(body)
-    log('BYOK streamJudgeStructured fallback: parsed verdict decision=', verdict.decision, '| conf=', verdict.confidence, '| summary=', verdict.summary.slice(0, 100))
-    return { verdict, reasoning }
-  }
-
-  /**
    * Build the chat-message payload for the judge. The transcript is
    * rendered as a single user message; the system prompt is generated
    * by `judgeSystemPrompt(product, cart, { judgeMode })`.
@@ -392,10 +345,7 @@ export class BYOK implements AIProvider {
         return `${tag}: ${m.text}`
       })
       .join('\n\n')
-    const tail =
-      this.judgeMode === 'natural'
-        ? 'Weigh the two arguments above. Your analysis can ONLY reference arguments the prosecution or the defense ACTUALLY MADE in the transcript — do not invent facts, do not assume the user\'s motivations, do not fabricate arguments neither side made. If the defense wrote something like "I want it" and nothing else, that IS their entire argument — say so plainly. Then end your response in this order: (1) the ruling line ("I rule in favor of the purchase." or "I rule in favor of restraint.") on its own line, (2) a CONFIDENCE: 0.XX line on its own line (e.g. CONFIDENCE: 0.78), and (3) a DECISIVE FACTORS: header followed by exactly 3 bullet points, one per line, each referencing something the prosecution or defense actually said. Nothing else after the bullets. See the system prompt for the full format and the confidence calibration.'
-        : 'Weigh the two arguments above. Your analysis can ONLY reference arguments the prosecution or the defense ACTUALLY MADE in the transcript — do not invent facts, do not assume the user\'s motivations, do not fabricate arguments neither side made. If the defense wrote something like "I want it" and nothing else, that IS their entire argument — say so plainly. Then end your response in this order: (1) the ruling line ("I rule in favor of the purchase." or "I rule in favor of restraint.") on its own line, (2) a CONFIDENCE: 0.XX line on its own line (e.g. CONFIDENCE: 0.78), and (3) a DECISIVE FACTORS: header followed by exactly 3 bullet points, one per line, each referencing something the prosecution or defense actually said. Nothing else after the bullets. See the system prompt for the full format and the confidence calibration.'
+    const tail = 'Weigh the two arguments above. Your analysis can ONLY reference arguments the prosecution or the defense ACTUALLY MADE in the transcript — do not invent facts, do not assume the user\'s motivations, do not fabricate arguments neither side made. If the defense wrote something like "I want it" and nothing else, that IS their entire argument — say so plainly. Then end your response in this order: (1) the ruling line ("I rule in favor of the purchase." or "I rule in favor of restraint.") on its own line, (2) a CONFIDENCE: 0.XX line on its own line (e.g. CONFIDENCE: 0.78), and (3) a DECISIVE FACTORS: header followed by exactly 3 bullet points, one per line, each referencing something the prosecution or defense actually said. Nothing else after the bullets. See the system prompt for the full format and the confidence calibration.'
     messages.push({ role: 'user', content: `FULL TRANSCRIPT (this is the ONLY evidence; you may not reference anything outside it):\n${transcript}\n\n${tail}` })
     return messages
   }
@@ -484,8 +434,12 @@ export class BYOK implements AIProvider {
     return acc
   }
 
-  private async nonStreamChat(messages: ChatMessageWire[], signal?: AbortSignal): Promise<string> {
-    const data = await this.nonStreamChatRaw(messages, signal)
+  private async nonStreamChat(
+    messages: ChatMessageWire[],
+    signal?: AbortSignal,
+    opts: { modelOverride?: string; temperature?: number } = {},
+  ): Promise<string> {
+    const data = await this.nonStreamChatRaw(messages, signal, opts)
     return (data?.choices?.[0]?.message?.content ?? '') as string
   }
 
@@ -523,158 +477,4 @@ export class BYOK implements AIProvider {
     log('BYOK non-stream done in', tEnd, 'ms | model=', model, '| textLen=', data.choices?.[0]?.message?.content?.length ?? 0)
     return data
   }
-
-  /**
-   * Structured-mode verdict parser. Kept for backwards compatibility
-   * with users who deliberately set `judgeMode: 'structured'`.
-   *
-   * Three passes:
-   *   1. Top-level JSON object
-   *   2. Fenced ```json``` block (last one wins)
-   *   3. Brace-balanced JSON substring scan (last one wins)
-   *
-   * Falls back to a cautious `abandon@0.6` if all passes fail.
-   */
-  private parseStructuredVerdict(raw: string): Verdict {
-    if (!raw || !raw.trim()) {
-      log('BYOK parseStructuredVerdict: empty raw input, returning fallback')
-      return fallbackVerdict('model returned an empty response')
-    }
-
-    log('BYOK parseStructuredVerdict: raw length=', raw.length, '| first200=', raw.slice(0, 200))
-
-    // === Pass 1: look for a clean, top-level verdict JSON ===
-    const cleaned = raw
-      .trim()
-      .replace(/^```(?:json)?/i, '')
-      .replace(/```$/, '')
-      .trim()
-    try {
-      const obj = JSON.parse(cleaned)
-      const v = this.extractVerdictFromObject(obj)
-      if (v) {
-        log('BYOK parseStructuredVerdict: Pass 1 succeeded, decision=', v.decision, '| conf=', v.confidence)
-        return v
-      }
-    } catch {}
-
-    // === Pass 2: extract the first / last fenced JSON block and parse it ===
-    const fencedMatches = Array.from(raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi))
-    if (fencedMatches.length > 0) {
-      log('BYOK parseStructuredVerdict: Pass 2 found', fencedMatches.length, 'fenced blocks')
-      for (const m of [...fencedMatches].reverse()) {
-        const body = (m[1] || '').trim()
-        try {
-          const obj = JSON.parse(body)
-          const v = this.extractVerdictFromObject(obj)
-          if (v) {
-            log('BYOK parseStructuredVerdict: Pass 2 succeeded, decision=', v.decision, '| conf=', v.confidence)
-            return v
-          }
-        } catch {}
-      }
-    }
-
-    // === Pass 3: walk all brace-balanced JSON substrings ===
-    const candidates = this.findJsonCandidates(raw)
-    log('BYOK parseStructuredVerdict: Pass 3 found', candidates.length, 'brace-balanced candidates')
-    for (const c of [...candidates].reverse()) {
-      try {
-        const obj = JSON.parse(c)
-        const v = this.extractVerdictFromObject(obj)
-        if (v) {
-          log('BYOK parseStructuredVerdict: Pass 3 succeeded, decision=', v.decision, '| conf=', v.confidence)
-          return v
-        }
-      } catch {}
-    }
-
-    log('BYOK parseStructuredVerdict: all passes failed, returning fallback')
-    return fallbackVerdict('no parseable JSON verdict in model output')
-  }
-
-  /**
-   * Given any parsed object (possibly nested), try to find a verdict-like
-   * shape and normalize it. Returns null if nothing reasonable is found.
-   */
-  private extractVerdictFromObject(obj: any, depth = 0): Verdict | null {
-    if (!obj || typeof obj !== 'object' || depth > 4) return null
-
-    // 1) Canonical shape at this level
-    const decisionRaw = obj.decision ?? obj.verdict ?? obj.ruling ?? obj.outcome
-    const decision = normalizeDecision(decisionRaw)
-    if (decision) {
-      const confidence = Number(obj.confidence ?? obj.conf ?? obj.certainty)
-      const factors: string[] = Array.isArray(obj.topFactors) && obj.topFactors.length >= 3
-        ? obj.topFactors.slice(0, 3).map((x: any) => String(x).trim())
-        : []
-      const summary = String(obj.summary ?? '').trim() ||
-        (Array.isArray(obj.reasons) ? obj.reasons.join(' ') : '') ||
-        'The court has reached a decision.'
-
-      if (factors.length === 3) {
-        return {
-          decision,
-          confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, Math.round(confidence * 100) / 100)) : 0.6,
-          summary,
-          topFactors: [factors[0], factors[1], factors[2]],
-        }
-      }
-      // Decision is present but factors are missing; still return a
-      // verdict so the user isn't stuck on the deliberation screen.
-      return {
-        decision,
-        confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, Math.round(confidence * 100) / 100)) : 0.6,
-        summary,
-        topFactors: ['Decision rendered', 'See analysis', 'Court reasoning'],
-      }
-    }
-
-    // 2) Recurse into nested objects
-    for (const v of Object.values(obj)) {
-      if (v && typeof v === 'object' && !Array.isArray(v)) {
-        const found = this.extractVerdictFromObject(v, depth + 1)
-        if (found) return found
-      }
-    }
-    return null
-  }
-
-  /**
-   * Find brace-balanced substrings that look like JSON. Skips strings,
-   * handles escaped braces, and trims trailing junk.
-   */
-  private findJsonCandidates(text: string): string[] {
-    const out: string[] = []
-    let depth = 0
-    let start = -1
-    let inString = false
-    let escape = false
-    for (let i = 0; i < text.length; i++) {
-      const ch = text[i]
-      if (inString) {
-        if (escape) { escape = false; continue }
-        if (ch === '\\') { escape = true; continue }
-        if (ch === '"') inString = false
-        continue
-      }
-      if (ch === '"') { inString = true; continue }
-      if (ch === '{') {
-        if (depth === 0) start = i
-        depth++
-      } else if (ch === '}') {
-        depth--
-        if (depth === 0 && start >= 0) {
-          out.push(text.slice(start, i + 1))
-          start = -1
-        } else if (depth < 0) {
-          depth = 0
-          start = -1
-        }
-      }
-    }
-    return out
-  }
 }
-
-

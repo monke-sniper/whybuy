@@ -32,11 +32,28 @@ export interface TrialProps {
   onAbandon?: (verdict: Verdict) => void
   onOverride?: (verdict: Verdict) => void
   onClose?: () => void
-  onTranscript?: (transcript: ChatMessage[], verdict: Verdict, outcome: 'accepted-abandon' | 'overridden-proceeded' | 'proceeded-after-proceed') => void
+  /** May return a promise; closing the tab waits for it so the record is never cut off. */
+  onTranscript?: (transcript: ChatMessage[], verdict: Verdict, outcome: 'accepted-abandon' | 'overridden-proceeded' | 'proceeded-after-proceed') => void | Promise<void>
 }
 
 /** Props the caller of mountTrial provides; mountTrial adds host/shadow. */
 export type MountTrialProps = Omit<TrialProps, 'host' | 'shadow'>
+
+/** Longest we wait for the outcome record to be written before navigating/closing. */
+const RECORD_WAIT_MS = 2000
+
+/**
+ * Resolve once the outcome record has been written, or after RECORD_WAIT_MS.
+ * Proceeding (navigation) and closing the tab both destroy this content
+ * script, so the storage writes must finish first or the outcome is lost.
+ * Bounded so a stuck storage call can never block the user.
+ */
+function recordSettled(recorded: void | Promise<void> | undefined): Promise<void> {
+  return Promise.race([
+    Promise.resolve(recorded).catch(() => {}),
+    new Promise<void>((resolve) => setTimeout(resolve, RECORD_WAIT_MS)),
+  ])
+}
 
 const AI_RESPONSE_TIMEOUT_MS = 120000
 const HEARTBEAT_INTERVAL_MS = 20000
@@ -412,8 +429,10 @@ export function TrialApp(props: TrialProps) {
     if (!state.verdict) return
     props.tts?.interrupt()
     dispatch({ type: 'USER_PROCEEDS' })
-    props.onTranscript?.(state.transcript, state.verdict, 'proceeded-after-proceed')
-    props.onProceed?.()
+    const recorded = props.onTranscript?.(state.transcript, state.verdict, 'proceeded-after-proceed')
+    // onProceed re-fires the checkout click, which usually navigates and
+    // destroys this script: let the history write land first.
+    void recordSettled(recorded).then(() => props.onProceed?.())
   }
 
   const handleAcceptLoss = () => {
@@ -436,13 +455,15 @@ export function TrialApp(props: TrialProps) {
     if (!state.verdict) return
     props.tts?.interrupt()
     dispatch({ type: 'USER_ACCEPTS_LOSS' })
-    props.onTranscript?.(state.transcript, state.verdict, 'accepted-abandon')
+    const recorded = props.onTranscript?.(state.transcript, state.verdict, 'accepted-abandon')
     props.onAbandon?.(state.verdict)
-    try {
-      chrome.runtime.sendMessage({ type: 'WHYBUY_CLOSE_TAB' })
-    } catch (e) {
-      console.warn('[WhyBuy] failed to send WHYBUY_CLOSE_TAB:', e)
-    }
+    void recordSettled(recorded).then(() => {
+      try {
+        chrome.runtime.sendMessage({ type: 'WHYBUY_CLOSE_TAB' })
+      } catch (e) {
+        console.warn('[WhyBuy] failed to send WHYBUY_CLOSE_TAB:', e)
+      }
+    })
   }
 
   const handleOverride = () => {

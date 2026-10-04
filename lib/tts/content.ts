@@ -16,15 +16,17 @@
  *   tts.setEnabled(bool) / isEnabled()
  *   tts.subscribe(cb)                  // state changes for the UI
  *
- * The manager reads voice settings via `loadSettings()` on every
- * `start()` and re-reads them when `enqueue()` is called, so the
- * Options page can change the key/voice live without remounting the
- * trial. The key is NEVER logged — only the `keySet` boolean.
+ * The manager reads voice settings via `loadSettings()` once per
+ * `start()` (the trial mount) and keeps them current through a
+ * `chrome.storage.onChanged` listener, so the Options page can change
+ * the key/voice live without remounting the trial and without a
+ * storage read per streamed chunk. The key is NEVER logged — only the
+ * `keySet` boolean.
  */
 
 import { SentenceBuffer } from './sentenceBuffer.ts'
 import { TtsPlayback, type TtsState } from './playback.ts'
-import { loadSettings, type VoiceConfig } from '@/lib/storage/settings.ts'
+import { loadSettings, SETTINGS_KEY, type VoiceConfig } from '@/lib/storage/settings.ts'
 import { log } from '@/lib/utils/log.ts'
 
 let singleton: TtsManager | null = null
@@ -65,6 +67,8 @@ class TtsManager {
   private speaking = false
   private subs = new Set<TtsSubscriber>()
   private lastState: TtsState = 'idle'
+  /** True once voice settings have been read at least once. */
+  private configLoaded = false
 
   constructor() {
     this.playback = new TtsPlayback({
@@ -77,6 +81,13 @@ class TtsManager {
         this.notify()
       },
     })
+    try {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && SETTINGS_KEY in changes) void this.syncFromSettings()
+      })
+    } catch {
+      // No storage events (tests): settings refresh on start()/sync only.
+    }
   }
 
   // === lifecycle ===
@@ -89,6 +100,7 @@ class TtsManager {
   async start(): Promise<boolean> {
     const settings = await loadSettings()
     this.config = settings.voice
+    this.configLoaded = true
     if (!this.config || !this.config.enabled || !this.config.apiKey) {
       this.enabled = false
       this.notify()
@@ -102,13 +114,20 @@ class TtsManager {
     return true
   }
 
+  /** Voice config, read from disk only the first time it is needed. */
+  private async ensureConfig(): Promise<VoiceConfig | null> {
+    if (!this.configLoaded) await this.refreshConfig()
+    return this.config
+  }
+
   /**
-   * Update voice config from disk. Called on every enqueue so the
-   * Options page can change the key/voice live.
+   * Re-read voice config from disk. Driven by the storage change
+   * listener so the Options page can change the key/voice live.
    */
   private async refreshConfig(): Promise<VoiceConfig | null> {
     const settings = await loadSettings()
     this.config = settings.voice
+    this.configLoaded = true
     if (this.config) {
       this.playback.setMuted(this.config.muted)
       this.playback.setVolume(this.config.volume)
@@ -126,20 +145,16 @@ class TtsManager {
   async enqueue(chunk: string): Promise<void> {
     if (!chunk) return
     this.speaking = true
-    if (!(await this.start())) {
-      this.notify()
-      return
-    }
-    const config = await this.refreshConfig()
+    const config = await this.ensureConfig()
     if (!config || !config.enabled || !config.apiKey) {
       this.notify()
       return
     }
+    this.enabled = true
     const sentence = this.buf.push(chunk)
     this.notify()
     if (sentence) this.playback.speak(sentence, ttsConfigFromVoice(config))
   }
-  // (refreshConfig already calls setPlaybackRate below)
 
   /**
    * Flush any buffered partial sentence. Call on stream end.
@@ -147,11 +162,7 @@ class TtsManager {
   async flush(): Promise<void> {
     if (!this.speaking) return
     this.speaking = false
-    if (!(await this.start())) {
-      this.notify()
-      return
-    }
-    const config = await this.refreshConfig()
+    const config = await this.ensureConfig()
     const rest = this.buf.flush()
     this.notify()
     if (rest && config && config.enabled && config.apiKey) {
@@ -209,9 +220,7 @@ class TtsManager {
    */
   async syncFromSettings(): Promise<void> {
     await this.refreshConfig()
-    if (this.config) {
-      this.enabled = this.config.enabled
-    }
+    this.enabled = !!(this.config?.enabled && this.config.apiKey)
     this.notify()
   }
 

@@ -40,6 +40,9 @@ let browser
 
 try {
   browser = await puppeteer.launch({
+    // Branded Chrome 137+ ignores --load-extension; install over CDP instead.
+    pipe: true,
+    enableExtensions: [extensionPath],
     executablePath: puppeteerChrome,
     headless: 'new',
     args: [
@@ -49,17 +52,19 @@ try {
       '--no-default-browser-check',
       '--lang=en-US',
       '--window-size=1280,1100',
-      `--disable-extensions-except=${extensionPath}`,
-      `--load-extension=${extensionPath}`,
     ],
     timeout: 60000,
   })
   await new Promise((r) => setTimeout(r, 2000))
 
   // Open the extension's Options page directly.
-  const swTarget = browser.targets().find(
-    (t) => t.type() === 'service_worker' && t.url().includes('chrome-extension://'),
-  )
+  // The extension is installed asynchronously; wait for its worker.
+  const swTarget = await browser
+    .waitForTarget(
+      (t) => t.type() === 'service_worker' && t.url().includes('chrome-extension://'),
+      { timeout: 15000 },
+    )
+    .catch(() => null)
   if (!swTarget) throw new Error('Service worker not found')
   const extensionId = new URL(swTarget.url()).host
   const optionsUrl = `chrome-extension://${extensionId}/options.html`

@@ -286,13 +286,16 @@ export function JudgeRoom({
                 >
                   Tab will close and a cooldown will be set on this product.
                 </div>
-                <button
-                  className="whybuy-btn-ghost whybuy-btn"
-                  onClick={() => setCloseCountdown(null)}
-                  style={{ background: 'transparent', color: '#e6c578' }}
-                >
-                  Cancel — keep me on the verdict
-                </button>
+                {/* At 0 the ruling is already being recorded and the tab is closing: too late to cancel. */}
+                {closeCountdown.remaining > 0 && (
+                  <button
+                    className="whybuy-btn-ghost whybuy-btn"
+                    onClick={() => setCloseCountdown(null)}
+                    style={{ background: 'transparent', color: '#e6c578' }}
+                  >
+                    Cancel — keep me on the verdict
+                  </button>
+                )}
               </div>
             ) : (
               <>

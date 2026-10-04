@@ -8,7 +8,7 @@ WhyBuy is a Manifest V3 Chrome extension that runs a purchase through a structur
 
 - **Checkout-only trigger** — the trial fires on exactly one user gesture: clicking a button that literally says "Checkout" / "Proceed to checkout" / "Go to checkout". No URL auto-trigger. No "Buy Now", "Add to cart", or "Place order" interception.
 - **Free AI providers** — Ollama Cloud (recommended), Google Gemini free tier, Groq, OpenRouter free models, local Ollama, or Chrome's on-device Prompt API. Falls back to a scripted opponent when AI is unavailable.
-- **Natural judge by default** — the judge writes a plain-text ruling in a fixed five-line shape. Works on every model, including non-reasoning ones like `ministral-3:8b`. Structured `<think>`+JSON mode is one click away in Settings.
+- **Natural judge by default** — the judge writes a plain-text ruling in a fixed five-line shape. Works on every model, including non-reasoning ones like `ministral-3:8b`.
 - **Minimal prompt by default** — the prosecution only sees the title, price, and site. The model uses its own world knowledge. Rich product card (brand, rating, prime, …) is opt-in in Settings.
 - **On-device option** — uses Chrome's built-in Prompt API (Gemini Nano) so nothing ever leaves your machine when the user picks it.
 - **Streaming responses** — the prosecution's arguments stream in real time, typewriter-style. The judge's reasoning streams live during deliberation.
@@ -110,7 +110,6 @@ Settings page has these toggles:
 | **Counsel model** | `ministral-3:3b` | The model used for the prosecution's arguments. |
 | **Judge model** | `ministral-3:8b` | The model used for the verdict. Defaults to the counsel model when empty. |
 | **Prompt detail** | Minimal (title+price+site) | Switch to "Rich" to send the full product card (brand, rating, prime, …) to the model. |
-| **Judge output** | Natural (line-based ruling) | Switch to "Structured" for the historical `<think>`+JSON verdict, best on reasoning models. |
 | **Debate length** | Standard (3 rounds) | Short = 2 rounds, Long = 4 rounds. |
 | **Prosecution tone** | Firm | Socratic = question-driven, Sardonic = dry and pointed. |
 | **Ignored sites** | _(empty)_ | WhyBuy never intercepts purchases on these domains. |
@@ -157,7 +156,7 @@ See [`PLAN.md`](./PLAN.md) for the full design document. Key files:
 - `lib/ai/judgeParse.ts` — natural-mode line-based verdict parser
 - `lib/ai/verdictHelpers.ts` — shared `normalizeDecision`, `clampConfidence`, `fallbackVerdict`
 - `lib/ai/byok.ts` — Ollama Cloud / Gemini / Groq / OpenRouter / Ollama adapter (streams the natural judge live)
-- `lib/ai/promptApi.ts` — Chrome Prompt API adapter (natural + structured)
+- `lib/ai/promptApi.ts` — Chrome Prompt API adapter 
 - `lib/ai/scripted.ts` — offline fallback opponent
 - `lib/ai/debug.ts` — last-10-prompts recorder for the debug panel
 - `lib/intercept/selectors.ts` — checkout-button heuristic

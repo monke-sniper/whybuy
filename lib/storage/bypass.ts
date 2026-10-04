@@ -9,16 +9,22 @@
  * rest of the session (not just the next click) so they can browse,
  * come back, and click checkout again without seeing the trial.
  *
- * Storage: `chrome.storage.session` is per-tab-session, NOT synced,
- * and cleared when the browser closes. This is exactly the scope
- * we want — the bypass survives navigation, page reloads, and tab
- * refocuses, but doesn't persist across browser restarts (the user
- * has to actively opt in via the override button each session).
+ * Storage: `chrome.storage.session` is shared by every tab, NOT synced,
+ * and cleared when the browser closes. The bypass survives navigation,
+ * page reloads and other tabs on the same site, but doesn't persist
+ * across browser restarts (the user has to actively opt in via the
+ * override button each session).
+ *
+ * NOTE: `storage.session` is only reachable from content scripts after
+ * the background worker calls `enableBypassStorageForContentScripts()`
+ * (the default access level is trusted contexts only). Without that
+ * call every read/write below fails and the bypass would live only in
+ * the page's memory.
  *
  * Reads use an in-memory cache so the synchronous click handler
  * can ask "is this site bypassed right now?" without awaiting an
  * async storage call. The cache is refreshed on startup, on every
- * override, and after the storage is mutated.
+ * override, and whenever another tab changes the stored set.
  */
 
 const KEY = 'whybuy.bypass.v1'
@@ -31,6 +37,43 @@ const EMPTY: BypassState = { sites: [] }
 
 let cache: BypassState = EMPTY
 let loaded = false
+let watching = false
+
+/**
+ * Called from the background worker on every start: lets content scripts
+ * read and write `chrome.storage.session`. No-op where the API is
+ * missing (older Chrome, Firefox).
+ */
+export async function enableBypassStorageForContentScripts(): Promise<void> {
+  try {
+    await chrome.storage.session?.setAccessLevel?.({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' })
+  } catch {
+    // Unsupported: the bypass degrades to per-page memory.
+  }
+}
+
+function sanitizeSites(raw: unknown): string[] {
+  const sites = (raw as BypassState | undefined)?.sites
+  return Array.isArray(sites) ? sites.filter((s) => typeof s === 'string' && s.length > 0) : []
+}
+
+/** Keep the sync cache current when another tab/frame changes the set. */
+function watchBypass(): void {
+  if (watching) return
+  try {
+    const onChanged = chrome.storage.onChanged
+    // No onChanged (test contexts): the cache is refreshed on load/set only.
+    if (!onChanged) return
+    onChanged.addListener((changes, area) => {
+      if (area !== 'session' || !(KEY in changes)) return
+      cache = { sites: sanitizeSites(changes[KEY].newValue) }
+      loaded = true
+    })
+    watching = true
+  } catch {
+    // Same: fall back to explicit refreshes.
+  }
+}
 
 /**
  * Load the current bypass state from `chrome.storage.session`.
@@ -39,15 +82,9 @@ let loaded = false
  */
 export async function loadBypass(): Promise<BypassState> {
   try {
+    watchBypass()
     const raw = (await chrome.storage.session.get(KEY))[KEY]
-    if (!raw || typeof raw !== 'object') {
-      cache = EMPTY
-    } else {
-      const sites = Array.isArray((raw as BypassState).sites)
-        ? (raw as BypassState).sites.filter((s) => typeof s === 'string' && s.length > 0)
-        : []
-      cache = { sites }
-    }
+    cache = !raw || typeof raw !== 'object' ? EMPTY : { sites: sanitizeSites(raw) }
   } catch {
     // storage.session is unavailable in some test contexts; fall back
     // to the in-memory cache (which is the empty default).

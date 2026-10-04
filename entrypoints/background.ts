@@ -7,6 +7,8 @@ import { TRIAL_PORT, type TrialEvent, type TrialRequest } from '@/lib/messaging/
 import { log, warn } from '@/lib/utils/log.ts'
 import { defineBackground } from 'wxt/utils/define-background'
 import { loadSettings } from '@/lib/storage/settings.ts'
+import { enableBypassStorageForContentScripts } from '@/lib/storage/bypass.ts'
+import { InflightRegistry } from '@/lib/messaging/inflight.ts'
 
 let providerPromise: Promise<AIProvider> | null = null
 
@@ -21,25 +23,18 @@ function describeProvider(p: AIProvider): string {
   return `${kind}${name ? `(${name})` : ''}`
 }
 
-/**
- * Active in-flight requests keyed by requestId, with their AbortControllers
- * so the trial UI can cancel. Cleared when the request resolves or is
- * cancelled.
- */
-const inflight = new Map<string, AbortController>()
+const inflight = new InflightRegistry<chrome.runtime.Port>()
 
 export default defineBackground(() => {
   log('WhyBuy background service worker booted')
+  void enableBypassStorageForContentScripts()
 
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== TRIAL_PORT) return
     port.onDisconnect.addListener(() => {
-      // Cancel any in-flight requests on this port so we don't leak
+      // Cancel any in-flight requests on THIS port so we don't leak
       // open fetch() calls when the content script unmounts.
-      for (const [id, ctrl] of inflight) {
-        try { ctrl.abort() } catch {}
-        inflight.delete(id)
-      }
+      inflight.abortAll(port)
     })
     port.onMessage.addListener((msg: TrialRequest) => {
       // Heartbeat: just acknowledging keeps the SW alive.
@@ -48,10 +43,7 @@ export default defineBackground(() => {
         return
       }
       if (msg.type === 'CANCEL') {
-        const ctrl = inflight.get(msg.requestId)
-        if (ctrl) {
-          try { ctrl.abort() } catch {}
-          inflight.delete(msg.requestId)
+        if (inflight.cancel(port, msg.requestId)) {
           send(port, { type: 'CANCELLED', requestId: msg.requestId })
         }
         return
@@ -115,6 +107,31 @@ async function resolveCallOptions(): Promise<{
 }
 
 async function handleRequest(msg: TrialRequest, port: chrome.runtime.Port): Promise<void> {
+  // Register before any await so a CANCEL that arrives while settings
+  // are still loading can already find (and abort) this request.
+  const requestId = (msg as any).requestId as string | undefined
+  const ctrl = new AbortController()
+  const inflightKey = inflight.register(port, requestId, ctrl)
+  try {
+    await runRequest(msg, port, requestId, ctrl)
+  } catch (err) {
+    if ((err as any)?.name === 'AbortError') {
+      log('SW request aborted:', requestId)
+      send(port, { type: 'CANCELLED', requestId } as TrialEvent)
+      return
+    }
+    send(port, { type: 'ERROR', message: err instanceof Error ? err.message : String(err), requestId } as TrialEvent)
+  } finally {
+    inflight.release(port, inflightKey, ctrl)
+  }
+}
+
+async function runRequest(
+  msg: TrialRequest,
+  port: chrome.runtime.Port,
+  requestId: string | undefined,
+  ctrl: AbortController,
+): Promise<void> {
   const settings = await loadSettings()
   const callOpts = await resolveCallOptions()
   log(
@@ -130,51 +147,40 @@ async function handleRequest(msg: TrialRequest, port: chrome.runtime.Port): Prom
     callOpts.judgeMode,
   )
   const provider = await getProvider(settings.byok)
-  const status = await provider.status()
-  log('SW provider picked:', describeProvider(provider), '| status=', status.kind)
-  send(port, { type: 'PROVIDER_STATUS', ...status, provider: provider.kind } as TrialEvent)
 
-  if (msg.type === 'GET_PROVIDER_STATUS') return
+  if (msg.type === 'GET_PROVIDER_STATUS') {
+    // The only message that probes the provider (BYOK caches the probe),
+    // so a trial costs one status check instead of one per request.
+    const status = await provider.status()
+    log('SW provider picked:', describeProvider(provider), '| status=', status.kind)
+    send(port, { type: 'PROVIDER_STATUS', ...status, provider: provider.kind } as TrialEvent)
+    return
+  }
 
-  const requestId = (msg as any).requestId as string | undefined
-  const ctrl = new AbortController()
-  if (requestId) inflight.set(requestId, ctrl)
-
-  try {
-    switch (msg.type) {
-      case 'OPENING':
-        await runCounsel(provider, msg.product, msg.cart ?? null, [], port, requestId, ctrl.signal, callOpts)
-        return
-      case 'PROSECUTION_TURN':
-        await runCounsel(provider, msg.product, msg.cart ?? null, msg.transcript, port, requestId, ctrl.signal, callOpts)
-        return
-      case 'JUDGE': {
-        const { verdict, reasoning } = await runJudge(
-          provider,
-          msg.product,
-          msg.cart ?? null,
-          msg.transcript,
-          (text) => send(port, { type: 'JUDGE_REASONING_CHUNK', text, requestId: requestId ?? '' } as TrialEvent),
-          requestId,
-          ctrl.signal,
-          callOpts,
-        )
-        log('SW runJudge reasoningLen=', reasoning.length, '| first200=', reasoning.slice(0, 200))
-        send(port, { type: 'VERDICT', verdict, requestId } as TrialEvent)
-        return
-      }
-      default:
-        warn('Unknown request:', msg)
-    }
-  } catch (err) {
-    if ((err as any)?.name === 'AbortError') {
-      log('SW request aborted:', requestId)
-      send(port, { type: 'CANCELLED', requestId } as TrialEvent)
+  switch (msg.type) {
+    case 'OPENING':
+      await runCounsel(provider, msg.product, msg.cart ?? null, [], port, requestId, ctrl.signal, callOpts)
+      return
+    case 'PROSECUTION_TURN':
+      await runCounsel(provider, msg.product, msg.cart ?? null, msg.transcript, port, requestId, ctrl.signal, callOpts)
+      return
+    case 'JUDGE': {
+      const { verdict, reasoning } = await runJudge(
+        provider,
+        msg.product,
+        msg.cart ?? null,
+        msg.transcript,
+        (text) => send(port, { type: 'JUDGE_REASONING_CHUNK', text, requestId: requestId ?? '' } as TrialEvent),
+        requestId,
+        ctrl.signal,
+        callOpts,
+      )
+      log('SW runJudge reasoningLen=', reasoning.length, '| first200=', reasoning.slice(0, 200))
+      send(port, { type: 'VERDICT', verdict, requestId } as TrialEvent)
       return
     }
-    send(port, { type: 'ERROR', message: err instanceof Error ? err.message : String(err), requestId } as TrialEvent)
-  } finally {
-    if (requestId) inflight.delete(requestId)
+    default:
+      warn('Unknown request:', msg)
   }
 }
 

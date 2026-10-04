@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { selectProvider, type AIProvider, type ByokConfig, type ByokProvider, type ProviderStatus } from '@/lib/ai/provider.ts'
 import { PromptApiProvider } from '@/lib/ai/promptApi.ts'
-import { BYOK } from '@/lib/ai/byok.ts'
+import { BYOK, clearByokStatusCache } from '@/lib/ai/byok.ts'
 import {
   loadSettings,
   saveSettings,
@@ -186,7 +186,7 @@ export function Options() {
 
       // The "active provider" status reflects what the SW would pick.
       const provider = await selectProvider(s.byok)
-      const status = await provider.status()
+      const status = await (clearByokStatusCache(), provider).status()
       setReport({ status, provider: provider.kind, name: (provider as any).name })
 
       setWarmup(loadWarmup(WARMUP_KEY))
@@ -265,7 +265,7 @@ export function Options() {
     setMessage(null)
     try {
       const p = new BYOK(cfg)
-      const status = await p.status()
+      const status = await (clearByokStatusCache(), p).status({ fresh: true })
       if (status.kind === 'ready') {
         // Real warmup with a small token-generating request.
         const ms = await warmupByok(cfg, { key: 'counsel' })
@@ -306,7 +306,7 @@ export function Options() {
     await saveSettings(next)
     // Re-check status.
     const p = new BYOK(next.byok!)
-    const status = await p.status()
+    const status = await (clearByokStatusCache(), p).status({ fresh: true })
     setReport({ status, provider: 'byok', name: p.name })
     // Auto-warm in the background so the next trial is fast. Don't block
     // the UI on this; it can take 30-60s for cold-start on Ollama Cloud.
@@ -328,7 +328,7 @@ export function Options() {
     setSettings(next)
     await saveSettings(next)
     const provider = await selectProvider(null)
-    const status = await provider.status()
+    const status = await (clearByokStatusCache(), provider).status()
     setReport({ status, provider: provider.kind, name: (provider as any).name })
   }
 
@@ -642,12 +642,6 @@ export function Options() {
                   onClick={() => updateSetting('judgeMode', 'natural' as JudgeMode)}
                   label="Natural"
                   detail="A neutral paragraph weighing both arguments, ending with 'I rule in favor of the purchase.' or 'I rule in favor of restraint.' Default — works on small models."
-                />
-                <ChoiceButton
-                  active={settings.judgeMode === 'structured'}
-                  onClick={() => updateSetting('judgeMode', 'structured' as JudgeMode)}
-                  label="Structured"
-                  detail="Same paragraph shape as Natural. Kept for backwards compatibility with stored settings."
                 />
               </div>
             </div>

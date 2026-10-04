@@ -523,6 +523,39 @@ const CONCRETE_NEED_PATTERNS: RegExp[] = [
   /\b(budgeted|planned)\s+(for|to)\b/i,
 ]
 
+/** Words/punctuation that end the clause a negation can reach. */
+const CLAUSE_BREAK_RE = /[.!?;,:—–]|\b(?:and|but|because|so|since|however|though|although|yet)\b/i
+/** A negation word inside a clause ("not for my dog", "never for my kid"). */
+const NEGATION_RE = /\b(?:not|never|no|nothing|without)\b|n't\b/i
+
+/** True if the text before `index` negates a match that starts there. */
+function isNegatedBefore(text: string, index: number): boolean {
+  // Only the clause that directly precedes the match counts, so
+  // "this is not a luxury and I need this for work" is NOT negated.
+  const clause = text.slice(0, index).split(new RegExp(CLAUSE_BREAK_RE.source, 'gi')).pop() ?? ''
+  return NEGATION_RE.test(clause)
+}
+
+/**
+ * Returns the matched text of the first concrete-need pattern found in
+ * a user (defense) message, or null. Matches preceded by a negation
+ * ("it's not for my dog") are ignored: they state the opposite.
+ */
+export function findConcreteNeed(transcript: ChatMessage[]): string | null {
+  if (!transcript || transcript.length === 0) return null
+  for (const msg of transcript) {
+    if (msg.role !== 'defense' || !msg.text) continue
+    for (const pattern of CONCRETE_NEED_PATTERNS) {
+      const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g')
+      for (const m of msg.text.matchAll(global)) {
+        if (isNegatedBefore(msg.text, m.index ?? 0)) continue
+        return m[0]
+      }
+    }
+  }
+  return null
+}
+
 /**
  * Returns true if any user message in the transcript contains a
  * concrete-need pattern. Conservative — only clear, unambiguous
@@ -530,16 +563,7 @@ const CONCRETE_NEED_PATTERNS: RegExp[] = [
  * ("I need new tech") do NOT match.
  */
 export function hasConcreteNeed(transcript: ChatMessage[]): boolean {
-  if (!transcript || transcript.length === 0) return false
-  const userMessages = transcript.filter((m) => m.role === 'defense')
-  if (userMessages.length === 0) return false
-  for (const msg of userMessages) {
-    if (!msg.text) continue
-    for (const pattern of CONCRETE_NEED_PATTERNS) {
-      if (pattern.test(msg.text)) return true
-    }
-  }
-  return false
+  return findConcreteNeed(transcript) !== null
 }
 
 /**
@@ -566,16 +590,19 @@ export function applyTranscriptOverride(
   // Only override if the model said restraint (or fallback). If
   // the model already said purchase, trust it.
   if (verdict.decision !== 'abandon') return verdict
-  if (!hasConcreteNeed(transcript)) return verdict
+  const need = findConcreteNeed(transcript)
+  if (!need) return verdict
 
   // Override: real need detected, force PURCHASE at 0.85+.
-  // The summary is preserved from the model's output (so the
-  // user still sees the model's reasoning). The factors are
+  // The model's summary is kept (so the user still sees its
+  // reasoning) but is followed by the reason the ruling flipped, so
+  // the summary never contradicts the verdict. The factors are
   // replaced to make the override VISIBLE in the UI.
+  const quote = need.length > 80 ? need.slice(0, 77) + '…' : need
   return {
     decision: 'proceed',
     confidence: 0.85,
-    summary: verdict.summary,
+    summary: `${verdict.summary} However, the defense stated a concrete need ("${quote}"), which tips the ruling in favor of the purchase.`,
     topFactors: [
       'User: stated a concrete, specific use case in the transcript',
       'Override: real need detected, defaulting to purchase',

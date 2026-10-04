@@ -67,6 +67,9 @@ let browser
 
 try {
   browser = await puppeteer.launch({
+    // Branded Chrome 137+ ignores --load-extension; install over CDP instead.
+    pipe: true,
+    enableExtensions: [extensionPath],
     executablePath: puppeteerChrome,
     headless: 'new',
     args: [
@@ -76,16 +79,18 @@ try {
       '--no-default-browser-check',
       '--lang=en-US',
       '--window-size=1280,900',
-      `--disable-extensions-except=${extensionPath}`,
-      `--load-extension=${extensionPath}`,
     ],
     timeout: 60000,
   })
   await new Promise((r) => setTimeout(r, 2000))
 
-  const swTarget = browser.targets().find(
-    (t) => t.type() === 'service_worker' && t.url().includes('chrome-extension://'),
-  )
+  // The extension is installed asynchronously; wait for its worker.
+  const swTarget = await browser
+    .waitForTarget(
+      (t) => t.type() === 'service_worker' && t.url().includes('chrome-extension://'),
+      { timeout: 15000 },
+    )
+    .catch(() => null)
   if (!swTarget) throw new Error('Service worker not found')
   const sw = await swTarget.worker()
   sw.on('console', (msg) => console.log('  [sw]', msg.text()))
@@ -132,17 +137,20 @@ try {
 
   // Click "Proceed to checkout" via direct DOM dispatch.
   const clicked = await page.evaluate(() => {
+    document.querySelectorAll('[data-wb-test-click]').forEach((e) => e.removeAttribute('data-wb-test-click'))
     const all = Array.from(document.querySelectorAll('button, a, input[type="submit"]'))
     for (const el of all) {
       const text = (el.textContent || el.value || el.getAttribute('aria-label') || '').trim()
       if (!/proceed\s*to\s*checkout/i.test(text)) continue
       el.scrollIntoView({ block: 'center' })
-      el.click()
+      el.setAttribute('data-wb-test-click', '1')
       return text
     }
     return null
   })
   if (!clicked) throw new Error('Could not click Proceed to checkout')
+  // A real mouse click: the interceptor only acts on trusted user clicks.
+  await page.click('[data-wb-test-click="1"]')
   console.log(`  ✔ Clicked "${clicked}"`)
 
   // Wait for the trial to mount.

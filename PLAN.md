@@ -13,7 +13,7 @@
 | History | Local (`chrome.storage.local`) with stats popup |
 | Input | Text only |
 | Default prompt detail | `minimal` (title + price + site). Rich product card behind a Settings toggle. |
-| Default judge mode | `natural` (line-based ruling). Structured `<think>`+JSON behind a Settings toggle. |
+| Default judge mode | `natural` (line-based ruling). |
 | Cooldown scope | Per product+site. UI groups cooldowns by site in the Options page. |
 | Test isolation | All e2e scripts require a tempdir `userDataDir`; non-tempdir profiles are refused unless `WHYBUY_ALLOW_REAL_PROFILE=1`. |
 
@@ -87,7 +87,7 @@ interface JudgeCallOptions {
   ```
   Parser: `lib/ai/judgeParse.ts → parseNaturalVerdict()`. Idempotent, case-insensitive, garbage-tolerant, streams reasoning live, returns `partial: true` until all five required fields are present. Works on every model including non-reasoning ones like `ministral-3:8b` on Ollama Cloud.
 
-- **`'structured'`** — the historical `<think>…</think>` analysis followed by strict JSON. Best on reasoning models like `gpt-oss:20b` or `kimi-k2-thinking`. Parser: `lib/ai/byok.ts → parseStructuredVerdict()` (3-pass: top-level JSON, fenced ```json``` block, brace-balanced scan).
+- **`'structured'`** — retired. The `<think>`+JSON judge was removed because small models couldn't follow it; a stored `'structured'` value is treated as `'natural'`.
 
 ## Trigger
 

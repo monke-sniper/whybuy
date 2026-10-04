@@ -81,6 +81,9 @@ try {
 
   // === 2. Launch Chrome with the extension ===
   browser = await puppeteer.launch({
+    // Branded Chrome 137+ ignores --load-extension; install over CDP instead.
+    pipe: true,
+    enableExtensions: [extensionPath],
     executablePath: puppeteerChrome,
     headless: 'new',
     args: [
@@ -90,8 +93,6 @@ try {
       '--no-default-browser-check',
       '--lang=en-US',
       '--window-size=1280,900',
-      `--disable-extensions-except=${extensionPath}`,
-      `--load-extension=${extensionPath}`,
       `--user-data-dir=${profileDir}`,
     ],
     dumpio: false,

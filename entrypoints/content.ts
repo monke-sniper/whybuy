@@ -1,8 +1,9 @@
-import { installClickInterceptor, type InterceptResult } from '@/lib/intercept/trigger'
+import { installClickInterceptor } from '@/lib/intercept/trigger'
+import { classifyElement } from '@/lib/intercept/selectors'
 import { extractProduct } from '@/lib/intercept/product'
 import { extractCart } from '@/lib/intercept/cart'
 import { selectProvider } from '@/lib/ai/provider'
-import type { Cart, Product, Verdict } from '@/lib/ai/types'
+import type { Cart, Product, ProviderStatus, Verdict, ByokConfig } from '@/lib/ai/types'
 import { appendHistory } from '@/lib/storage/history'
 import { setCooldown, getCooldown, getCooldownFingerprint } from '@/lib/storage/cooldowns'
 import { loadSettings } from '@/lib/storage/settings'
@@ -30,37 +31,22 @@ export default defineContentScript({
       // explicitly clicks a "Checkout" / "Proceed to checkout" button.
       // No URL auto-trigger.
       //
-      // `consumeSuppress` is checked BEFORE target matching and
-      // BEFORE preventDefault, so a re-dispatched click from
-      // `onProceed` or `onOverride` actually navigates to the
-      // checkout page (the previous design checked the counter
-      // AFTER preventDefault, which always blocked the re-dispatch).
-      //
-      // `consumeBypass` is also BEFORE target matching + BEFORE
-      // preventDefault. After the user clicks "I disagree — proceed
-      // anyway" on a restraint verdict, the current site is added
-      // to a session-scoped bypass set. From then on, every
-      // checkout click on this site passes through to /checkout
-      // without re-triggering the trial.
+      // `consumeBypass` runs BEFORE target matching and BEFORE
+      // preventDefault: it lets every checkout click through on a site
+      // the user has overridden ("I disagree — proceed anyway"). Our own
+      // re-dispatched click needs no special case because the
+      // interceptor ignores untrusted (synthetic) clicks.
       const removeInterceptor = installClickInterceptor(
         (result) => {
-          const { product, cart } = extractSubject()
           void openTrial({
-            product,
-            cart,
+            ...extractSubject(result.product),
             event: result.event,
-            source: 'click',
+            // The matched element itself: `event.target` is retargeted
+            // (or cleared) once dispatch ends, so it can't be trusted later.
+            target: result.match.element,
           })
         },
         {
-          hasActiveTrial: () => activeController != null,
-          consumeSuppress: () => {
-            if (suppressNextClicks > 0) {
-              suppressNextClicks--
-              return true
-            }
-            return false
-          },
           consumeBypass: () => isBypassedSync(location.hostname),
         },
       )
@@ -92,122 +78,137 @@ async function waitForBody(): Promise<void> {
 }
 
 let activeController: TrialController | null = null
-/** When non-zero, the next click(s) should pass through unblocked. */
-let suppressNextClicks = 0
-/** Bumped on every verdict; used to ignore stale stream events. */
+/** True while openTrial is between "click intercepted" and "overlay mounted". */
+let opening = false
+/**
+ * True from the moment reDispatch is scheduled until the synthetic click
+ * has fired. A fast second click in that window is a duplicate of the
+ * one being replayed and must not schedule another replay (that would
+ * submit a checkout form twice).
+ */
+let redispatchPending = false
+/** Bumped on every trial open; used to ignore stale callbacks. */
 let trialEpoch = 0
 /**
- * Session-level set of product/cart fingerprints that have already been
- * shown the trial. Prevents the trial from reopening after the user
- * overrules or proceeds. The trial is a "gate" (one-time check), not
- * a "wall" (permanent block).
+ * Fingerprints of products/carts whose trial the user already resolved
+ * by going ahead (proceed or override) on this page. The trial is a
+ * "gate" (one-time check), not a "wall" (permanent block), so a repeat
+ * checkout click for the same subject passes straight through.
  */
 const trialShownThisSession = new Set<string>()
 
 async function openTrial(args: {
   product: Product
   cart: Cart | null
-  event?: MouseEvent
-  source: 'click' | 'url'
+  event: MouseEvent
+  target: Element
 }): Promise<void> {
-  const { product, cart, event, source } = args
+  const { product, cart, event, target } = args
 
-  // Skip sites the user has ignored.
-  const settings = await loadSettings()
-  if (settings.ignoredSites.includes(location.hostname)) {
-    log('Ignoring intercepted site:', location.hostname)
+  // The interceptor already cancelled this click. A second click while
+  // a trial is mounted (or mounting) is just a duplicate: swallow it.
+  if (activeController || opening || redispatchPending) {
+    activeController?.focus()
     return
   }
 
-  // Cooldown check: scoped to the *product group* (cart items or single
-  // product), not the page. Different carts (hat vs groceries) have
-  // independent cooldowns.
-  const cooldownFp = getCooldownFingerprint(product, cart)
-  const existing = await getCooldown(cooldownFp)
+  opening = true
+  try {
+    // Every path below either mounts the trial or re-fires the click,
+    // so a cancelled checkout click is never silently lost.
+    const settings = await loadSettings()
+    if (settings.ignoredSites.includes(location.hostname)) {
+      log('Ignoring intercepted site:', location.hostname)
+      reDispatch(event, target, product)
+      return
+    }
 
-  // Session-level check: prevent the trial from reopening after the user
-  // overrules or proceeds. The trial is a "gate" (one-time check), not
-  // a "wall" (permanent block). If the user has already seen the trial
-  // for this product/cart in this session, let them through.
-  if (trialShownThisSession.has(cooldownFp)) {
-    log('Trial already shown for this product/cart in this session, letting through:', cooldownFp)
-    return
+    // Cooldown check: scoped to the *product group* (cart items or single
+    // product), not the page. Different carts (hat vs groceries) have
+    // independent cooldowns.
+    const cooldownFp = getCooldownFingerprint(product, cart)
+    if (trialShownThisSession.has(cooldownFp)) {
+      log('Trial already resolved for this product/cart, letting through:', cooldownFp)
+      reDispatch(event, target, product)
+      return
+    }
+    const existing = await getCooldown(cooldownFp)
+    const status = await resolveProviderStatus(settings.byok)
+
+    const epoch = ++trialEpoch
+    activeController = await mountTrial({
+      product,
+      cart,
+      existingCooldown: existing,
+      providerStatus: status,
+      onProceed: () => {
+        trialShownThisSession.add(cooldownFp)
+        if (epoch !== trialEpoch) return
+        reDispatch(event, target, product)
+      },
+      onAbandon: (_verdict) => {
+        // Recording is handled by the `onTranscript` callback (which
+        // carries the full transcript). This callback exists so the
+        // trial app can also surface "user accepted the ruling" in
+        // the activity log without double-recording.
+      },
+      onOverride: (_verdict) => {
+        trialShownThisSession.add(cooldownFp)
+        if (epoch !== trialEpoch) return
+        // Recording is handled by the `onTranscript` callback. This
+        // callback owns the side effects the `onTranscript` path
+        // can't: closing the trial overlay and setting the per-site
+        // bypass so the next "Continue to checkout" click passes
+        // through to /checkout naturally (without re-triggering the
+        // trial). The user is returned to the cart; they click the
+        // real "Continue to checkout" button themselves, so we do NOT
+        // re-dispatch the original click here.
+        void setBypass(location.hostname).then(() => {
+          log('Override: bypass set for', location.hostname)
+        })
+        const c = activeController
+        activeController = null
+        c?.close()
+      },
+      onClose: () => {
+        if (epoch !== trialEpoch) return
+        const c = activeController
+        activeController = null
+        c?.close()
+      },
+      onTranscript: (transcript, verdict, outcome) => {
+        if (epoch !== trialEpoch) return
+        // Returned so "accept the ruling" can wait for the writes before closing the tab.
+        return recordOutcome(product, cart, verdict, outcome === 'overridden-proceeded', transcript)
+      },
+    })
+  } catch (e) {
+    // Extension context invalidated, storage failure, etc. Fail open:
+    // never leave the user with a dead checkout button.
+    warn('openTrial failed, letting the click through:', e)
+    activeController = null
+    reDispatch(event, target, product)
+  } finally {
+    opening = false
   }
-
-  if (activeController) {
-    activeController.focus()
-    return
-  }
-
-  const provider = await selectProvider(settings.byok)
-  const status = await provider.status()
-
-  // Mark this product/cart as "trial shown" for this session. This
-  // prevents the trial from reopening if the user overrules or proceeds
-  // and then clicks "Proceed to checkout" again.
-  trialShownThisSession.add(cooldownFp)
-  log('Trial shown for product/cart:', cooldownFp)
-
-  const epoch = ++trialEpoch
-  activeController = await mountTrial({
-    product,
-    cart,
-    existingCooldown: existing,
-    providerStatus: status,
-    onProceed: () => {
-      if (epoch !== trialEpoch) return
-      if (source === 'click' && event) {
-        reDispatch(event, product)
-      } else {
-        log('Proceeding from URL-triggered trial for', product.name)
-      }
-    },
-    onAbandon: (_verdict) => {
-      // Recording is handled by the `onTranscript` callback (which
-      // carries the full transcript). This callback exists so the
-      // trial app can also surface "user accepted the ruling" in
-      // the activity log without double-recording.
-    },
-    onOverride: (_verdict) => {
-      if (epoch !== trialEpoch) return
-      // Recording is handled by the `onTranscript` callback. This
-      // callback owns the side effects the `onTranscript` path
-      // can't: closing the trial overlay and setting the per-site
-      // bypass so the next "Continue to checkout" click passes
-      // through to /checkout naturally (without re-triggering the
-      // trial). The user is returned to the cart page; they click
-      // the real "Continue to checkout" button themselves.
-      //
-      // We do NOT re-dispatch the original click here — the
-      // previous design did, but it forced the user to land on
-      // /checkout immediately, which is jarring. The user wanted
-      // to "return to the cart and press continue to checkout",
-      // so we leave them on the cart and let the bypass handle
-      // the next click.
-      void setBypass(location.hostname).then(() => {
-        log('Override: bypass set for', location.hostname)
-      })
-      const c = activeController
-      activeController = null
-      c?.close()
-    },
-    onClose: () => {
-      if (epoch !== trialEpoch) return
-      const c = activeController
-      activeController = null
-      c?.close()
-    },
-    onTranscript: (transcript, verdict, outcome) => {
-      if (epoch !== trialEpoch) return
-      void recordOutcome(product, cart, verdict, outcome === 'overridden-proceeded', transcript)
-    },
-  })
 }
 
 /**
- * Determine the subject of the trial. On cart pages, extract the cart
- * (multiple items, total) and attach it to the product. Elsewhere, just
- * extract the product.
+ * Provider status for the overlay. A BYOK provider is reported ready
+ * without a network probe: the probe is a real completion request, and
+ * the background worker runs it (cached) when the trial asks for the
+ * provider status. Only the local Prompt API check runs here.
+ */
+async function resolveProviderStatus(byok: ByokConfig | null): Promise<ProviderStatus> {
+  const provider = await selectProvider(byok)
+  if (provider.kind === 'byok') return { kind: 'ready' }
+  return provider.status()
+}
+
+/**
+ * Determine the subject of the trial from the product the interceptor
+ * already extracted. On cart pages, extract the cart (multiple items,
+ * total) and attach it to the product.
  *
  * On a single-item cart we also override the product's `name` with the
  * cart item's name, because `extractProduct()` on a cart page falls
@@ -215,9 +216,8 @@ async function openTrial(args: {
  * a real product. The cart item is the real product; using its name
  * keeps the trial grounded in what the user is actually buying.
  */
-function extractSubject(): { product: Product; cart: Cart | null } {
+function extractSubject(product: Product): { product: Product; cart: Cart | null } {
   const cart = extractCart()
-  const product = extractProduct()
   if (cart && cart.items.length > 0) {
     if (cart.items.length === 1 && cart.items[0].name) {
       product.name = cart.items[0].name
@@ -232,94 +232,61 @@ function extractSubject(): { product: Product; cart: Cart | null } {
 
 /**
  * Re-fire the user's original "Proceed to checkout" click so the page
- * actually navigates. Called from `onProceed` (proceed verdict) and
- * `onOverride` (abandon verdict + user disagrees).
+ * actually navigates. Used when the verdict is "proceed" and whenever
+ * the trial is skipped (ignored site, already resolved, or a failure).
  *
- * Three layers of fallback, in order:
+ * The click is dispatched exactly once, on the original target, with
+ * the original modifier keys (so ctrl/cmd-click still opens a new tab).
+ * That runs the element's own handlers and its default action (link
+ * navigation, form submit). We deliberately do NOT also call
+ * `form.submit()` or assign `location.href`: the click already does
+ * those, and repeating them submits a checkout form twice.
  *
- *  1. Native `.click()` on the original target. This runs the
- *     element's own click handler chain AND executes the default
- *     action (link navigation, form submit). For form-submit
- *     elements (`<input type="submit">` / `<button type="submit">`),
- *     this re-submits the surrounding `<form>`.
+ * The synthetic click is untrusted, which the interceptor ignores, so
+ * it reaches the page without any suppress counter or flag that a real
+ * user click could slip through.
  *
- *  2. For submit-button targets whose ancestor `<form>` is still
- *     present, we also call `form.submit()` directly. This bypasses
- *     any on-page click handler that called `preventDefault()` and
- *     forces the form to submit. (`.click()` does NOT call
- *     `form.submit()` if a handler preventDefault'd the click.)
- *
- *  3. Final hard fallback: 250ms after the re-dispatch, if we're
- *     still on the same origin AND still on a cart-like path, set
- *     `location.href` to the link's href or the form's action URL.
- *     This is the last resort for pages that aggressively
- *     intercept the click (Amazon.ca is one of these).
- *
- * The click interceptor's `consumeSuppress` is bumped to 3 (not 1)
- * to allow a brief window of multiple clicks through (e.g. if the
- * form has a nested clickable element that fires its own click on
- * submit). The bump is harmless: once we've navigated, the page
- * unloads and the counter goes with it.
+ * If the page re-rendered while the trial was open and the original
+ * element is gone, we look for the current checkout button instead.
  */
-function reDispatch(event: MouseEvent, product: Product): void {
-  // Bump the suppress counter before any timing-dependent logic.
-  // consumeSuppress() decrements it. We bump to 3 because some
-  // pages fire multiple click events for a single user gesture
-  // (focus + click on the target, then click on a wrapping
-  // element, etc.). 3 is enough for the common cases without
-  // leaving a long window where the user could accidentally
-  // trigger a trial.
-  suppressNextClicks = 3
+function reDispatch(event: MouseEvent, original: Element, product: Product): void {
+  const init: MouseEventInit = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: window,
+    button: 0,
+    ctrlKey: event.ctrlKey,
+    shiftKey: event.shiftKey,
+    altKey: event.altKey,
+    metaKey: event.metaKey,
+  }
 
-  const target = event.target as Element | null
-  const href = target instanceof HTMLAnchorElement ? target.href : null
-  const form = target instanceof HTMLElement ? target.closest('form') : null
-  const formAction = form instanceof HTMLFormElement ? form.action : null
-  const origin = location.origin
-  const pathBefore = location.pathname
-
+  redispatchPending = true
   setTimeout(() => {
     try {
-      if (target && document.contains(target)) {
-        log('Re-dispatching click via .click() for', product.name)
-        // .click() runs the element's own click handler AND executes
-        // the default action (link navigation, form submit, etc.).
-        ;(target as HTMLElement).click()
-        // For submit-button targets, also call form.submit() to
-        // bypass any on-page click handler that called
-        // preventDefault(). form.submit() does NOT fire a submit
-        // event, so on-page handlers can't block it, and it
-        // immediately navigates to the form's action URL.
-        if (form && form instanceof HTMLFormElement && formAction) {
-          try {
-            log('Form-submit fallback: calling form.submit() for', product.name)
-            form.submit()
-          } catch (e) {
-            warn('form.submit() failed (expected for cross-origin forms):', e)
-          }
-        }
-        // Final hard fallback: 250ms after the re-dispatch, if
-        // we're still on the same path AND same origin, force-
-        // navigate to the link's href or the form's action.
-        setTimeout(() => {
-          if (location.origin !== origin) return
-          if (location.pathname !== pathBefore) return
-          const target2 = href || formAction
-          if (target2) {
-            log('All click-based fallbacks failed; forcing location.href =', target2)
-            try {
-              location.href = target2
-            } catch (e) {
-              warn('location.href assignment failed:', e)
-            }
-          }
-        }, 250)
+      const target = original.isConnected ? original : findCheckoutTarget()
+      if (!target) {
+        warn('Re-dispatch: checkout target is gone and no replacement was found for', product.name)
         return
       }
+      log('Re-dispatching click for', product.name)
+      target.dispatchEvent(new MouseEvent('click', init))
     } catch (e) {
       warn('Re-dispatch failed:', e)
+    } finally {
+      redispatchPending = false
     }
   }, 60)
+}
+
+/** Find the page's current checkout button (used when the original was removed). */
+function findCheckoutTarget(): Element | null {
+  const candidates = document.querySelectorAll('button, a, input[type="submit"], input[type="button"], [role="button"], [role="link"]')
+  for (const el of candidates) {
+    if (classifyElement(el)) return el
+  }
+  return null
 }
 
 async function recordOutcome(

@@ -89,7 +89,9 @@ export interface Settings {
   stt: SttConfig | null
 }
 
-const KEY = 'whybuy.settings.v1'
+/** chrome.storage.local key holding the Settings object. */
+export const SETTINGS_KEY = 'whybuy.settings.v1'
+const KEY = SETTINGS_KEY
 
 const DEFAULT_VOICE: VoiceConfig = {
   enabled: false,

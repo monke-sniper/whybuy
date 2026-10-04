@@ -3079,7 +3079,8 @@ test('applyTranscriptOverride: flips restraint to PURCHASE 0.85+ when user says 
   assert.match(out.topFactors[1], /Override: real need detected/i)
   assert.match(out.topFactors[2], /0\.85\+.*in favor of purchase/i)
   // The model's summary is preserved so the user still sees reasoning.
-  assert.equal(out.summary, v.summary)
+  assert.ok(out.summary.startsWith(v.summary), 'model summary is kept')
+  assert.match(out.summary, /concrete need/, 'summary explains why the ruling flipped')
 })
 
 test('applyTranscriptOverride: fires on "I work from home" (work-related need)', () => {
@@ -4152,4 +4153,298 @@ test('parsePriceString: cart version behaves identically (same .ca override)', a
   const out = parsePriceString('$24.99', 'amazon.ca')
   assert.equal(out.currency, 'CAD', 'cart parser also overrides on .ca')
   assert.equal(out.price, 24.99)
+})
+
+// === Regression tests for the code-review fixes ===
+
+import { computeStats } from '../lib/storage/history.ts'
+import { InflightRegistry } from '../lib/messaging/inflight.ts'
+import { findConcreteNeed } from '../lib/ai/judgeParse.ts'
+import { enableBypassStorageForContentScripts } from '../lib/storage/bypass.ts'
+import { BYOK, clearByokStatusCache } from '../lib/ai/byok.ts'
+
+/** Run `fn` with a stubbed globalThis.chrome, restoring it afterwards. */
+async function withChrome(stub, fn) {
+  const saved = globalThis.chrome
+  globalThis.chrome = stub
+  try {
+    return await fn()
+  } finally {
+    if (saved === undefined) delete globalThis.chrome
+    else globalThis.chrome = saved
+  }
+}
+
+test('computeStats: an overridden purchase is NOT counted as money saved', async () => {
+  const rec = (outcome, price) => ({
+    id: outcome + price,
+    ts: 1,
+    product: { name: 'x', price, currency: 'CAD', domain: 'a.com' },
+    cart: null,
+    transcript: [],
+    verdict: { decision: 'abandon', confidence: 0.7, summary: '', topFactors: ['a', 'b', 'c'] },
+    outcome,
+  })
+  const history = [
+    rec('accepted-abandon', 100),
+    rec('overridden-proceeded', 200),
+    rec('proceeded-after-proceed', 50),
+  ]
+  const stats = await withChrome(
+    { storage: { local: { get: async (k) => ({ [k]: history }) } } },
+    () => computeStats(),
+  )
+  assert.equal(stats.trials, 3)
+  assert.equal(stats.abandoned, 1, 'only the accepted ruling is a restrained purchase')
+  assert.equal(stats.proceeded, 2, 'override and proceed both count as proceeded')
+  assert.equal(stats.savedAmount, 100, 'the overridden $200 was spent, not saved')
+})
+
+test('InflightRegistry: abortAll only aborts the disconnecting port', () => {
+  const reg = new InflightRegistry()
+  const portA = {}
+  const portB = {}
+  const a = new AbortController()
+  const b = new AbortController()
+  // Same requestId on two ports must not collide.
+  reg.register(portA, 'req-1', a)
+  reg.register(portB, 'req-1', b)
+  reg.abortAll(portA)
+  assert.equal(a.signal.aborted, true)
+  assert.equal(b.signal.aborted, false, "another tab's request must survive")
+})
+
+test('InflightRegistry: cancel is scoped to the port and ignores unknown ids', () => {
+  const reg = new InflightRegistry()
+  const portA = {}
+  const portB = {}
+  const a = new AbortController()
+  reg.register(portA, 'req-1', a)
+  assert.equal(reg.cancel(portB, 'req-1'), false, 'other port cannot cancel it')
+  assert.equal(a.signal.aborted, false)
+  assert.equal(reg.cancel(portA, 'nope'), false)
+  assert.equal(reg.cancel(portA, 'req-1'), true)
+  assert.equal(a.signal.aborted, true)
+  assert.equal(reg.cancel(portA, 'req-1'), false, 'already cancelled')
+})
+
+test('InflightRegistry: id-less requests are still aborted on disconnect, release forgets', () => {
+  const reg = new InflightRegistry()
+  const port = {}
+  const anon = new AbortController()
+  const done = new AbortController()
+  reg.register(port, undefined, anon)
+  const key = reg.register(port, 'finished', done)
+  reg.release(port, key, done)
+  reg.abortAll(port)
+  assert.equal(anon.signal.aborted, true)
+  assert.equal(done.signal.aborted, false, 'a released request is no longer tracked')
+})
+
+test('findConcreteNeed: a negated need does not count ("it is NOT for my dog")', () => {
+  assert.equal(findConcreteNeed([sampleUserMsg("honestly it's not for my dog, I just want it")]), null)
+  assert.equal(findConcreteNeed([sampleUserMsg('this is never for my kid, it is for me')]), null)
+  assert.equal(findConcreteNeed([sampleUserMsg("I don't need this for work, I just like it")]), null)
+})
+
+test('findConcreteNeed: a genuine need still matches, including after a comma-separated "no"', () => {
+  assert.match(findConcreteNeed([sampleUserMsg('buying it for my dog')]), /for my dog/i)
+  assert.match(findConcreteNeed([sampleUserMsg('No, my current laptop broke last week')]), /broke/)
+})
+
+test('InflightRegistry: a late release of an old request does not drop a newer one with the same id', () => {
+  const reg = new InflightRegistry()
+  const port = {}
+  const oldCtrl = new AbortController()
+  const newCtrl = new AbortController()
+  const oldKey = reg.register(port, 'dup', oldCtrl)
+  const newKey = reg.register(port, 'dup', newCtrl)
+  reg.release(port, oldKey, oldCtrl) // old request finishes late
+  reg.abortAll(port)
+  assert.equal(newCtrl.signal.aborted, true, 'the newer request is still tracked and gets aborted')
+  assert.equal(oldKey, newKey)
+})
+
+test('findConcreteNeed: a negation in an EARLIER clause does not cancel a later real need', () => {
+  assert.match(findConcreteNeed([sampleUserMsg('this is not a luxury and I need this for work')]), /I need this for work/i)
+  assert.match(findConcreteNeed([sampleUserMsg("it isn't a toy, my old laptop broke")]), /broke/)
+  assert.match(findConcreteNeed([sampleUserMsg('I cannot cope without it because my phone broke')]), /broke/)
+})
+
+test('findConcreteNeed: does not mistake a word ending in "not" for a negation', () => {
+  assert.match(findConcreteNeed([sampleUserMsg('I tied a knot in my cable and now my charger broke')]), /broke/)
+})
+
+test('findConcreteNeed: ignores prosecution/judge text', () => {
+  assert.equal(findConcreteNeed([sampleProsecutionMsg('is this for my dog?'), sampleJudgeMsg('for my kid')]), null)
+})
+
+test('applyTranscriptOverride: a negated need does NOT flip the verdict', () => {
+  const v = restraintVerdict()
+  const out = applyTranscriptOverride(v, [sampleUserMsg("it's not for my dog lol, impulse buy")])
+  assert.equal(out, v)
+})
+
+test('applyTranscriptOverride: the flipped summary quotes the need and does not contradict the ruling', () => {
+  const out = applyTranscriptOverride(restraintVerdict(), [sampleUserMsg('I need it, my old phone broke')])
+  assert.equal(out.decision, 'proceed')
+  assert.match(out.summary, /\bphone broke\b/)
+  assert.match(out.summary, /in favor of the purchase/)
+})
+
+test('Bypass: enableBypassStorageForContentScripts opens storage.session to content scripts', async () => {
+  let level = null
+  await withChrome(
+    { storage: { session: { setAccessLevel: async (o) => { level = o.accessLevel } } } },
+    () => enableBypassStorageForContentScripts(),
+  )
+  assert.equal(level, 'TRUSTED_AND_UNTRUSTED_CONTEXTS')
+})
+
+test('Bypass: enableBypassStorageForContentScripts never throws where the API is missing', async () => {
+  await withChrome({ storage: {} }, () => enableBypassStorageForContentScripts())
+  await withChrome(
+    { storage: { session: { setAccessLevel: async () => { throw new Error('unsupported') } } } },
+    () => enableBypassStorageForContentScripts(),
+  )
+})
+
+test('Bypass: another tab adding a site updates this tab via storage.onChanged', async () => {
+  const listeners = []
+  const store = {}
+  const stub = {
+    storage: {
+      session: {
+        get: async (k) => ({ [k]: store[k] }),
+        set: async (o) => Object.assign(store, o),
+      },
+      onChanged: { addListener: (fn) => listeners.push(fn) },
+    },
+  }
+  await withChrome(stub, async () => {
+    await refreshBypass()
+    assert.equal(isBypassedSync('shop.example'), false)
+    // Simulate a write from a different tab.
+    for (const fn of listeners) fn({ 'whybuy.bypass.v1': { newValue: { sites: ['shop.example'] } } }, 'session')
+    assert.equal(isBypassedSync('shop.example'), true, 'cache follows the other tab without a reload')
+    // Changes in other areas / keys are ignored.
+    for (const fn of listeners) fn({ 'whybuy.bypass.v1': { newValue: { sites: [] } } }, 'local')
+    assert.equal(isBypassedSync('shop.example'), true)
+  })
+})
+
+function byokFetchStub() {
+  const calls = []
+  const stub = async (url, init) => {
+    calls.push({ url, body: JSON.parse(init.body) })
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'p' } }] }), { status: 200 })
+  }
+  return { calls, stub }
+}
+
+test('BYOK.status: concurrent and repeated calls share ONE network probe', async () => {
+  clearByokStatusCache()
+  const { calls, stub } = byokFetchStub()
+  const savedFetch = globalThis.fetch
+  globalThis.fetch = stub
+  try {
+    const p = new BYOK({ provider: 'groq', apiKey: 'k1', model: 'm1' })
+    const [a, b] = await Promise.all([p.status(), p.status()])
+    assert.deepEqual(a, { kind: 'ready' })
+    assert.deepEqual(b, { kind: 'ready' })
+    await p.status()
+    assert.equal(calls.length, 1, 'cached after the first probe')
+    // A different model is a different probe.
+    await new BYOK({ provider: 'groq', apiKey: 'k1', model: 'm2' }).status()
+    assert.equal(calls.length, 2)
+  } finally {
+    globalThis.fetch = savedFetch
+    clearByokStatusCache()
+  }
+})
+
+test('BYOK.status: { fresh: true } re-probes even when a result is cached', async () => {
+  clearByokStatusCache()
+  const { calls, stub } = byokFetchStub()
+  const savedFetch = globalThis.fetch
+  globalThis.fetch = stub
+  try {
+    const p = new BYOK({ provider: 'groq', apiKey: 'kf', model: 'mf' })
+    await p.status()
+    await p.status()
+    assert.equal(calls.length, 1)
+    await p.status({ fresh: true })
+    assert.equal(calls.length, 2, 'explicit Test connection bypasses the cache')
+  } finally {
+    globalThis.fetch = savedFetch
+    clearByokStatusCache()
+  }
+})
+
+test('BYOK.status: a hung provider settles to an error instead of stalling later calls', async () => {
+  clearByokStatusCache()
+  const savedFetch = globalThis.fetch
+  let sawSignal = false
+  globalThis.fetch = (url, init) => {
+    sawSignal = init.signal instanceof AbortSignal
+    return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted'))))
+  }
+  try {
+    const p = new BYOK({ provider: 'groq', apiKey: 'kh', model: 'mh' })
+    const pending = p.status()
+    // Simulate the timeout firing: the probe's signal is wired up.
+    assert.equal(sawSignal, true, 'probe carries an AbortSignal timeout')
+    // Do not wait the real 10s; just prove an aborted probe maps to an error result.
+    globalThis.fetch = async () => { throw new Error('aborted') }
+    clearByokStatusCache()
+    const s = await new BYOK({ provider: 'groq', apiKey: 'kh', model: 'mh2' }).status()
+    assert.equal(s.kind, 'error')
+    void pending
+  } finally {
+    globalThis.fetch = savedFetch
+    clearByokStatusCache()
+  }
+})
+
+test('BYOK.status: missing key needs no network, and a failed probe is reported', async () => {
+  clearByokStatusCache()
+  let n = 0
+  const savedFetch = globalThis.fetch
+  globalThis.fetch = async () => { n++; return new Response('nope', { status: 401 }) }
+  try {
+    assert.deepEqual(await new BYOK({ provider: 'groq', apiKey: '' }).status(), { kind: 'needs-key' })
+    assert.equal(n, 0)
+    const s = await new BYOK({ provider: 'groq', apiKey: 'bad' }).status()
+    assert.equal(s.kind, 'error')
+    assert.match(s.reason, /401/)
+  } finally {
+    globalThis.fetch = savedFetch
+    clearByokStatusCache()
+  }
+})
+
+test('BYOK judge calls use the configured judge model, counsel calls use the counsel model', async () => {
+  clearByokStatusCache()
+  const bodies = []
+  const savedFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body)
+    bodies.push(body)
+    if (body.stream) {
+      const sse = 'data: ' + JSON.stringify({ choices: [{ delta: { content: 'ok' } }] }) + '\n\ndata: [DONE]\n\n'
+      return new Response(sse, { status: 200 })
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 })
+  }
+  try {
+    const p = new BYOK({ provider: 'groq', apiKey: 'k', model: 'counsel-m', judgeModel: 'judge-m' })
+    const args = { systemPrompt: 's', transcript: [], product: product, cart: null }
+    await p.streamJudgeVerdict(args, () => {})
+    await p.judgeVerdict(args)
+    await p.counselTurn({ systemPrompt: 's', history: [], product, cart: null, speaker: 'prosecution' }, () => {})
+    assert.deepEqual(bodies.map((b) => b.model), ['judge-m', 'judge-m', 'counsel-m'])
+  } finally {
+    globalThis.fetch = savedFetch
+    clearByokStatusCache()
+  }
 })

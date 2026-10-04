@@ -38,7 +38,9 @@ export async function computeStats(): Promise<HistoryStats> {
   for (const t of all) {
     const amount = t.cart ? t.cart.total : t.product.price
     const cur = t.cart ? t.cart.currency : t.product.currency
-    if (t.outcome === 'accepted-abandon' || t.outcome === 'overridden-proceeded') {
+    // Only an accepted ruling saves money. An override means the user
+    // went ahead and bought anyway, so it counts as proceeded.
+    if (t.outcome === 'accepted-abandon') {
       abandoned++
       if (amount != null) savedAmount += amount
     } else {
