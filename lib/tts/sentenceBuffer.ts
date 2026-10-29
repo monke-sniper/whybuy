@@ -117,7 +117,7 @@ export class SentenceBuffer {
       const c = this.buf[i]
       if (c !== '.' && c !== '!' && c !== '?') continue
       const next = this.buf[i + 1] ?? ''
-      if (next && !/[\s"'”’\)\]]/.test(next)) {
+      if (next && !/[\s"'”’)\]]/.test(next)) {
         // Next char is a letter or punctuation that suggests the
         // period is mid-word / mid-abbreviation. Skip.
         continue

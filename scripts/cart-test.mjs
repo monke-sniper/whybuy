@@ -144,7 +144,6 @@ try {
     const el = document.querySelector('[data-whybuy="1"]')
     const shadow = el?.shadowRoot
     const verdict = shadow?.querySelector('.whybuy-verdict-card')
-    const cartSummary = shadow?.querySelector('.whybuy-cart-summary')
     return {
       hasVerdict: !!verdict,
       hasCartInVerdict: !!(verdict && verdict.textContent.includes('Cart')),

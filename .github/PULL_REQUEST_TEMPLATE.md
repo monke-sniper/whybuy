@@ -11,6 +11,7 @@
 
 ## Checklist
 
+- [ ] `npm run lint` passes
 - [ ] `npm run typecheck` passes
 - [ ] `npm run test:unit` passes
 - [ ] `npm run build` succeeds

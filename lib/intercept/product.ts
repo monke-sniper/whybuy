@@ -435,10 +435,10 @@ function extractAmazonDetails(name: string): ProductDetailsResult {
 
 function extractAmazonBrand(byline: string, productName: string): string | null {
   // "Visit the Anker Store"
-  let m = byline.match(/visit\s+the\s+([\w][\w\s\-&'.]{1,40}?)\s+store/i)
+  let m = byline.match(/visit\s+the\s+([\w][\w\s&-'.]{1,40}?)\s+store/i)
   if (m) return trimBrand(m[1])
   // "Brand: Anker"
-  m = byline.match(/brand\s*[:\-]\s*([\w][\w\s\-&'.]{1,40}?)(?:[,\n]|$)/i)
+  m = byline.match(/brand\s*[:-]\s*([\w][\w\s\-&'.]{1,40}?)(?:[,\n]|$)/i)
   if (m) return trimBrand(m[1])
   // "by Anker"
   m = byline.match(/\bby\s+([\w][\w\s\-&'.]{1,40}?)(?:[,\n]|$)/i)
@@ -528,7 +528,7 @@ export function parsePriceString(
   const cleaned = raw.replace(/\s+/g, ' ').trim()
   // Currency detection: leading symbol or 3-letter code.
   let currency: string | null = null
-  const symMatch = cleaned.match(/^([\$€£¥]|US\s*\$|C\$|A\$|CA\$|AU\$|CDN\$)/i)
+  const symMatch = cleaned.match(/^([$€£¥]|US\s*\$|C\$|A\$|CA\$|AU\$|CDN\$)/i)
   if (symMatch) {
     const sym = symMatch[1].toUpperCase().replace(/\s/g, '')
     const map: Record<string, string> = { '$': 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY', 'C$': 'CAD', 'A$': 'AUD' }
@@ -577,7 +577,7 @@ export function cleanName(name: string): string {
   if (!name) return ''
   let s = name
   // Strip trailing site suffix like "| Amazon.com" / " - Amazon.ca"
-  s = s.replace(/\s+[\|—–-]\s+(?:amazon\.[a-z.]+|www\.[^\s]+)\s*$/i, '')
+  s = s.replace(/\s+[|—–-]\s+(?:amazon\.[a-z.]+|www\.[^\s]+)\s*$/i, '')
   // Strip trailing " - Amazon.com" without a leading separator (rare, but
   // Amazon's mobile layout sometimes renders " - Amazon.com" directly)
   s = s.replace(/\s+-\s+Amazon\.[a-z.]+\s*$/i, '')

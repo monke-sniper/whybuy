@@ -3,7 +3,7 @@
 //
 // Usage: node scripts/smoke.mjs
 
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'

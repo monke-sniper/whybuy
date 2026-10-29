@@ -8,8 +8,6 @@ import { log, warn } from '@/lib/utils/log.ts'
 import { defineBackground } from 'wxt/utils/define-background'
 import { loadSettings } from '@/lib/storage/settings.ts'
 
-let providerPromise: Promise<AIProvider> | null = null
-
 function getProvider(byok: import('@/lib/ai/types').ByokConfig | null = null): Promise<AIProvider> {
   // Always re-evaluate so the latest BYOK setting is honored.
   return selectProvider(byok)

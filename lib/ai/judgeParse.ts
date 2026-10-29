@@ -332,7 +332,7 @@ export function extractFactors(text: string): string[] {
  */
 function sanitizeBullet(raw: string): string {
   let s = raw.replace(/^[\s*_~`]+|[\s*_~`]+$/g, '').replace(/`+/g, '').trim()
-  s = s.replace(/^[\s"'`\*_~>]+|[\s"'`\*_~<]+$/g, '')
+  s = s.replace(/^[\s"'`*_~>]+|[\s"'`*_~<]+$/g, '')
   s = s.replace(/\s+/g, ' ')
   // Strip bold/italic markers that flank a single word at the
   // start of the bullet (e.g. "**bold** factor" -> "bold

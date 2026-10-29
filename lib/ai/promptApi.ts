@@ -42,8 +42,8 @@ declare global {
       languageModel?: SessionFactory & { canCreateTextSession?: () => Promise<string> }
     }
   }
-  // Top-level LanguageModel (newer API).
-  // eslint-disable-next-line no-var
+  // Top-level LanguageModel (newer API). `var` is required for a global
+  // augmentation; `let`/`const` are not allowed here.
   var LanguageModel: (SessionFactory & { availability?: (opts?: any) => Promise<any> }) | undefined
 }
 

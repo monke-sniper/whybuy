@@ -92,7 +92,6 @@ try {
 
   // === Test 2: Tiered button classification ===
   console.log('\n=== Test 2: Button classification ===')
-  const { classifyElement } = await import('../lib/intercept/selectors.ts')
 
   // Make a tiny test page with various buttons.
   const tierPage = await browser.newPage()

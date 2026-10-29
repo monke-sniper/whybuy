@@ -22,10 +22,10 @@
 //   node scripts/install.mjs --help
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, statSync } from 'node:fs'
-import { dirname, join, resolve, sep } from 'node:path'
+import { existsSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { platform, tmpdir } from 'node:os'
+import { platform } from 'node:os'
 import { createInterface } from 'node:readline/promises'
 import { stdin, stdout, exit } from 'node:process'
 

@@ -20,7 +20,7 @@
 import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { tmpdir, hostname } from 'node:os'
+import { tmpdir } from 'node:os'
 import puppeteer from 'puppeteer-core'
 import { assertIsolatedProfile, logIsolatedProfile } from './lib/test-isolation.mjs'
 

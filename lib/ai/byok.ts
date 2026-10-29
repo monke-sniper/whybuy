@@ -326,8 +326,7 @@ export class BYOK implements AIProvider {
     }
     let acc = ''
     // Wrap onDelta so it always sees the running accumulator.
-    let wrappedOnDelta: ((d: string) => void) | undefined
-    wrappedOnDelta = (delta: string) => {
+    const wrappedOnDelta = (delta: string) => {
       acc += delta
       onDelta(delta)
     }

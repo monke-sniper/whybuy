@@ -20,13 +20,13 @@
 // trial by overriding `provider.judgeVerdict` / `provider.counselTurn`
 // to return canned text. That keeps the test fast and offline.
 
-import { mkdtempSync, rmSync, existsSync, readdirSync, statSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, existsSync, readdirSync, statSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { createServer } from 'node:http'
 import puppeteer from 'puppeteer-core'
-import { isTempProfile, assertIsolatedProfile, logIsolatedProfile } from './lib/test-isolation.mjs'
+import { assertIsolatedProfile, logIsolatedProfile } from './lib/test-isolation.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = join(__dirname, '..')
@@ -48,7 +48,6 @@ try {
   // extension's content script can run. The sentinel file lives in
   // a *different* tempdir so we can verify Chrome doesn't touch
   // anything outside its own user-data-dir.
-  const fixtureDir = mkdtempSync(join(tmpdir(), 'whybuy-audit-fixture-'))
   const profileDir = mkdtempSync(join(tmpdir(), 'whybuy-audit-profile-'))
   const sentinelDir = mkdtempSync(join(tmpdir(), 'whybuy-audit-sentinel-'))
   const sentinelFile = join(sentinelDir, 'must-not-be-touched.txt')

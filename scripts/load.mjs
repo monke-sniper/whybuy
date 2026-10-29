@@ -18,7 +18,7 @@
 //   WHYBUY_ALLOW_REAL_PROFILE=1 node scripts/load.mjs /path/to/real/profile
 
 import { spawn } from 'node:child_process'
-import { existsSync, rmSync, mkdtempSync } from 'node:fs'
+import { existsSync, mkdtempSync } from 'node:fs'
 import { join, dirname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -38,7 +38,7 @@ const requestedProfile = process.argv[2] || process.env.WHYBUY_PROFILE || null
 // Test isolation: a real (non-tempdir) profile would let the
 // extension's storage state pollute the user's day-to-day Chrome.
 // Refuse unless explicitly allowed.
-const isTempProfile = (p: string): boolean => {
+const isTempProfile = (p) => {
   if (!p) return false
   const abs = resolve(p)
   const tmp = resolve(tmpdir())
@@ -46,7 +46,7 @@ const isTempProfile = (p: string): boolean => {
   return abs === tmp || abs.startsWith(tmp + sep)
 }
 
-let userDataDir: string
+let userDataDir
 if (requestedProfile) {
   if (isTempProfile(requestedProfile)) {
     userDataDir = requestedProfile

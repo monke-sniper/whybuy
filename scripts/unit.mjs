@@ -1187,7 +1187,7 @@ test('brandInitial: leading whitespace is trimmed', () => {
 //   - partial-streaming: parse as the model types
 //   - fallback paths (no decision, partial result)
 
-import { parseNaturalVerdict, verdictFromNatural, extractFactors, hasConcreteNeed, applyTranscriptOverride } from '../lib/ai/judgeParse.ts'
+import { parseNaturalVerdict, verdictFromNatural, extractFactors, applyTranscriptOverride } from '../lib/ai/judgeParse.ts'
 import { clampConfidence, fallbackVerdict, normalizeDecision } from '../lib/ai/verdictHelpers.ts'
 
 const NATURAL_OK = `The Nike Air Max shoes at CAD 122.94 are a want, not a need. The prosecution argued the cost is disproportionate to a "sometimes daily" use case, and the defense did not name a single cheaper alternative. The prosecution's case is the stronger one.
@@ -2585,7 +2585,6 @@ test('TtsPlayback: playbackRate from speak() config is applied to AudioBufferSou
   const savedAudioContext = globalThis.AudioContext
   const savedFetch = globalThis.fetch
   // Stub AudioContext to capture playbackRate settings.
-  let capturedRate = null
   class FakeContext {
     state = 'running'
     currentTime = 0
@@ -2606,7 +2605,7 @@ test('TtsPlayback: playbackRate from speak() config is applied to AudioBufferSou
       })
       return src
     }
-    async decodeAudioData(b) { return { duration: 0.1, sampleRate: 22050, getChannelData: () => new Float32Array(2205), numberOfChannels: 1, length: 2205 } }
+    async decodeAudioData(_b) { return { duration: 0.1, sampleRate: 22050, getChannelData: () => new Float32Array(2205), numberOfChannels: 1, length: 2205 } }
     async resume() {}
     async close() {}
   }
@@ -2642,7 +2641,7 @@ test('elevenLabsTts sends speed in voice_settings (default 1.2 for turbo v2.5)',
     }
   }
   try {
-    const { elevenLabsTts, DEFAULT_MODEL_ID } = await import('../lib/tts/elevenLabs.ts')
+    const { elevenLabsTts } = await import('../lib/tts/elevenLabs.ts')
     await elevenLabsTts({
       apiKey: 'k',
       voiceId: 'v',
@@ -3032,7 +3031,6 @@ DECISIVE FACTORS:
 
 const sampleUserMsg = (text, ts = 1) => ({ role: 'defense', text, ts })
 const sampleProsecutionMsg = (text, ts = 1) => ({ role: 'prosecution', text, ts })
-const sampleJudgeMsg = (text, ts = 1) => ({ role: 'judge', text, ts })
 const restraintVerdict = (overrides = {}) => ({
   decision: 'abandon',
   confidence: 0.65,

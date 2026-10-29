@@ -32,7 +32,7 @@ function looksLikeCartPage(url: string): boolean {
       /\/cart(\/|$|\?)/.test(path) ||
       /\/basket/.test(path) ||
       /\/checkout\/cart/.test(path) ||
-      /\/shopping[\-_ ]?cart/.test(path) ||
+      /\/shopping[-_ ]?cart/.test(path) ||
       /\/gp\/cart/.test(path)
     )
   } catch {
@@ -668,7 +668,7 @@ export function parsePriceString(
   if (!raw) return { price: null, currency: null }
   const cleaned = raw.replace(/\s+/g, ' ').trim()
   let currency: string | null = null
-  const symMatch = cleaned.match(/^([\$€£¥]|US\s*\$|C\$|A\$|CA\$|AU\$|CDN\$)/i)
+  const symMatch = cleaned.match(/^([$€£¥]|US\s*\$|C\$|A\$|CA\$|AU\$|CDN\$)/i)
   if (symMatch) {
     const sym = symMatch[1].toUpperCase().replace(/\s/g, '')
     const map: Record<string, string> = { '$': 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY', 'C$': 'CAD', 'A$': 'AUD' }
