@@ -1,0 +1,31 @@
+name: audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so advisories published against an unchanged lockfile still surface.
+    - cron: "0 6 * * 1"
+
+jobs:
+  audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Runtime dependencies end up in the packaged extension, so any
+      # high/critical advisory here fails the build.
+      - name: Runtime dependencies (blocking)
+        run: npm audit --omit=dev --audit-level=high
+      # Build and test tooling never ships. Report it, don't block on it.
+      - name: Dev dependencies (advisory only)
+        run: |
+          npm audit --audit-level=high || \
+            echo "::warning::high/critical advisories in dev-only dependencies; see SECURITY.md"

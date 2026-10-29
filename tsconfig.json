@@ -5,6 +5,8 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
+    // wxt 0.21 enables this by default; off until the existing index accesses are narrowed.
+    "noUncheckedIndexedAccess": false,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "jsx": "react-jsx",

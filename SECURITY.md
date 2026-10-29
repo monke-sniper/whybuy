@@ -17,6 +17,17 @@ We will acknowledge within **72 hours** and aim to ship a fix within **30 days**
 - **API key handling.** Keys are stored in `chrome.storage.local` and only sent to the provider's official endpoint via `Authorization: Bearer …`. We never proxy, log, or transmit keys to anywhere else.
 - **Cooling-off bypass.** The 24-hour cooldown is a guardrail. A bug that lets the user skip it would defeat the point of the extension.
 
+## Dependency advisories
+
+The extension that ships is the bundle WXT writes to `.output/`. It contains no `node_modules`. Its only runtime dependencies are `react` and `react-dom`, which are bundled in. CI runs `npm audit --omit=dev --audit-level=high` against that runtime tree and fails the build on any high or critical advisory (`.github/workflows/audit.yml`).
+
+Build and test tooling (`wxt`, `vite`, `web-ext`, `puppeteer`, `tailwindcss`, and their transitive dependencies) runs on developer machines and in CI. It is not part of the extension. Advisories there are reported as CI warnings and are fixed as soon as a patched version can be installed without breaking the build.
+
+Known dev-only advisories still open, with no compatible fix yet:
+
+- **`deepmerge`** (low), reached through `web-ext`'s lint dependency `addons-linter`, a Firefox packaging tool.
+- **`esbuild`** (low), pinned by `vite`. Affects the dev server on Windows, not the built extension. Revisit when `vite` accepts a patched `esbuild`.
+
 ## Out of scope
 
 - Issues in third-party providers (Ollama Cloud, Gemini, etc.) — please report to them directly.
